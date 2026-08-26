@@ -1,0 +1,3 @@
+- insert:
+    - id: feishu-channel
+      name: dsh-feishu-channel

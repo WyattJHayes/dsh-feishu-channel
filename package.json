@@ -1,0 +1,37 @@
+{
+  "name": "dsh-feishu-channel",
+  "version": "0.1.0-alpha.1",
+  "description": "Feishu (Lark) channel plugin for DeepSeek Harness — chat with your local DSH agent from Feishu via WebSocket long connection. Zero inbound ports, zero tunnels.",
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "feishu",
+    "lark",
+    "channel"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.73.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  }
+}
