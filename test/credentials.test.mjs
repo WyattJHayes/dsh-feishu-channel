@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WSClient } from '@larksuiteoapi/node-sdk';
 import { normalizeConfig } from '../lib/config.js';
-import { apply, resolveStatePath } from '../lib/index.js';
+import { apply, createIndexedBindings, resolveStatePath } from '../lib/index.js';
 
 test('config: default credential refs use environment-compatible names', () => {
   const { config } = normalizeConfig();
@@ -37,7 +37,7 @@ test('config: normalizes allowed project roots and numeric limits', () => {
 test('plugin: declares the services used by apply', async () => {
   const { inject } = await import('../lib/index.js');
 
-  assert.deepEqual(inject, ['credentials', 'agents', 'agentDefaultModel', 'agentPresets']);
+  assert.deepEqual(inject, ['credentials', 'agents', 'agentDefaultModel', 'agentPresets', 'permissionPresets']);
 });
 
 test('plugin: reads the top-level event id emitted by the Lark dispatcher', async () => {
@@ -68,13 +68,96 @@ test('agent: includes cwd in creation metadata', async () => {
 
 test('agent: setup callback does not return the model selection disposer', async () => {
   const { createAgentSetup } = await import('../lib/index.js');
-  const agentCtx = { on: () => () => {} };
+  const agentCtx = {
+    agent: { session: { events: [], append() {} } },
+    on: () => () => {},
+  };
   const agentPresets = { mount: async () => {} };
+  const permissionPresets = {
+    apply() {},
+    current() { return 'workspace-write'; },
+  };
 
   assert.equal(await createAgentSetup(agentCtx, {
     current: { provider: 'wechat', model: 'Deepseek-v4-flash' },
     agentPresets,
+    permissionPresets,
   }), undefined);
+});
+
+test('agent: refuses setup when the permission preset service is missing', async () => {
+  const { createAgentSetup } = await import('../lib/index.js');
+  const agentCtx = { agent: { session: { events: [] } }, on: () => () => {} };
+
+  await assert.rejects(() => createAgentSetup(agentCtx, {
+    current: { provider: 'deepseek', model: 'model-1' },
+    agentPresets: { mount: async () => {} },
+  }), /FEISHU_NO_PERMISSION_PRESETS_SERVICE/);
+});
+
+test('agent: refuses setup when permission cannot be reduced to workspace-write', async () => {
+  const { createAgentSetup } = await import('../lib/index.js');
+  const agentCtx = { agent: { session: { events: [] } }, on: () => () => {} };
+
+  await assert.rejects(() => createAgentSetup(agentCtx, {
+    current: { provider: 'deepseek', model: 'model-1' },
+    agentPresets: { mount: async () => {} },
+    permissionPresets: {
+      apply() {},
+      current() { return 'danger-full-access'; },
+    },
+  }), /FEISHU_REMOTE_PERMISSION_FAILED/);
+});
+
+test('agent: applies the workspace-write preset before registering remote listeners', async () => {
+  const { createAgentSetup } = await import('../lib/index.js');
+  const order = [];
+  const session = {
+    events: [],
+    append(type, data) {
+      this.events.push({ type, data });
+    },
+  };
+  const agentCtx = {
+    agent: { session },
+    on(name) {
+      order.push(`on:${name}`);
+      return () => {};
+    },
+  };
+  const permissionPresets = {
+    apply(receivedSession, name, setApproval) {
+      assert.equal(receivedSession, session);
+      assert.equal(name, 'workspace-write');
+      order.push('permission');
+      setApproval('ask');
+    },
+    current() { return 'workspace-write'; },
+  };
+
+  await createAgentSetup(agentCtx, {
+    current: { provider: 'deepseek', model: 'model-1' },
+    chatId: 'chat-1',
+    projectPath: '/work/project',
+    agentPresets: { mount: async () => order.push('mount') },
+    approvalBridge: {
+      remember() {},
+      createListener() {
+        return async () => 'allowed-once';
+      },
+    },
+    permissionPresets,
+  });
+
+  assert.deepEqual(order, [
+    'mount',
+    'permission',
+    'on:system-prompt/assemble',
+    'on:agent/request',
+    'on:tools/pre-execute',
+    'on:approval/request',
+  ]);
+  assert.deepEqual(session.events, [{ type: 'approval/policy', data: { policy: 'ask' } }]);
 });
 
 test('agent: reuses only a live session binding', async () => {
@@ -155,9 +238,21 @@ test('agent: reads final assistant text from the completed turn', async () => {
       { seq: 7, type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } },
     ],
     4,
+    2,
   );
 
   assert.deepEqual(result, { kind: 'text', text: '运行完成' });
+});
+
+test('agent: does not select an unrelated latest turn without a claimed turn', async () => {
+  const { getAgentTurnResult } = await import('../lib/index.js');
+  const result = getAgentTurnResult([
+    { seq: 0, type: 'turn/start', data: { turn: 1 } },
+    { seq: 1, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'desktop result' }] } } },
+    { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  ], 0);
+
+  assert.deepEqual(result, { kind: 'pending' });
 });
 
 test('credentials: returns the trimmed value from a credential lookup', async () => {
@@ -301,6 +396,105 @@ test('sender serializes concurrent messages and releases the queue after complet
   releaseFirst({ code: 0 });
   await Promise.all([first, second]);
   assert.deepEqual(calls, [1, 2]);
+});
+
+test('sender retries a retryable 429 response and honors retry-after', async () => {
+  const { createFeishuSender } = await import('../lib/index.js');
+  const delays = [];
+  const uuids = [];
+  let attempts = 0;
+  const sender = createFeishuSender({
+    resolveCredential: async () => 'test-credential',
+    clientFactory: () => ({
+      im: {
+        message: {
+          create: async ({ data }) => {
+            attempts += 1;
+            uuids.push(data.uuid);
+            if (attempts === 1) return { status: 429, headers: { 'retry-after': '2' }, code: 429 };
+            return { code: 0 };
+          },
+        },
+      },
+    }),
+    timeoutMs: 100,
+    maxRetries: 2,
+    retryBaseMs: 1,
+    sleep: async (delay) => delays.push(delay),
+  });
+
+  await sender('chat-1', 'final text');
+
+  assert.equal(attempts, 2);
+  assert.deepEqual(delays, [2000]);
+  assert.match(uuids[0], /^[0-9a-f-]{36}$/);
+  assert.equal(uuids[0], uuids[1]);
+});
+
+test('sender retries network errors, then returns a bounded failure after exhaustion', async () => {
+  const { createFeishuSender } = await import('../lib/index.js');
+  let attempts = 0;
+  const sender = createFeishuSender({
+    resolveCredential: async () => 'test-credential',
+    clientFactory: () => ({
+      im: {
+        message: {
+          create: async () => {
+            attempts += 1;
+            const error = new Error('transport details');
+            error.code = 'ECONNRESET';
+            throw error;
+          },
+        },
+      },
+    }),
+    timeoutMs: 100,
+    maxRetries: 2,
+    retryBaseMs: 0,
+    sleep: async () => {},
+  });
+
+  await assert.rejects(() => sender('chat-1', 'final text'), /FEISHU_SEND_FAILED/);
+  assert.equal(attempts, 3);
+});
+
+test('sender does not retry a non-retryable Feishu business error', async () => {
+  const { createFeishuSender } = await import('../lib/index.js');
+  let attempts = 0;
+  const sender = createFeishuSender({
+    resolveCredential: async () => 'test-credential',
+    clientFactory: () => ({
+      im: {
+        message: {
+          create: async () => {
+            attempts += 1;
+            return { code: 230020, msg: 'permission denied' };
+          },
+        },
+      },
+    }),
+    timeoutMs: 100,
+    maxRetries: 2,
+    retryBaseMs: 0,
+    sleep: async () => {},
+  });
+
+  await assert.rejects(() => sender('chat-1', 'final text'), /FEISHU_SEND_API_FAILED/);
+  assert.equal(attempts, 1);
+});
+
+test('sender redacts SDK logger input that contains request credentials', async () => {
+  const { createSafeSdkLogger } = await import('../lib/index.js');
+  const secret = 'placeholder-secret-value';
+  const messages = [];
+  const logger = createSafeSdkLogger({ warn: (message) => messages.push(message) });
+
+  logger.error(new Error(`request body app_secret=${secret}`));
+  logger.error([{ config: { data: JSON.stringify({ app_secret: secret }) }, response: { data: { secret } } }]);
+
+  assert.equal(messages.length, 2);
+  assert.ok(messages.every((message) => !message.includes(secret)));
+  assert.ok(messages.every((message) => message === 'feishu-channel: Feishu SDK error'));
 });
 
 test('credentials: resolves refs by name and reads the returned value', async () => {
@@ -510,4 +704,88 @@ test('plugin: closes the Feishu WS client without writing a trace file', async (
     else process.env.DSH_HOME = previousHome;
     await rm(home, { recursive: true, force: true });
   }
+});
+
+test('plugin: reports WS readiness only after a successful handshake callback', async () => {
+  const previousHome = process.env.DSH_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dsh-feishu-channel-'));
+  const effects = [];
+  const logs = [];
+  const originalStart = WSClient.prototype.start;
+  const originalClose = WSClient.prototype.close;
+  let startParams;
+  let readyCallback;
+  let errorCallback;
+
+  WSClient.prototype.start = async function start(params) {
+    startParams = params;
+    readyCallback = this.onReady;
+    errorCallback = this.onError;
+    assert.equal(this.logger.level, 1);
+  };
+  WSClient.prototype.close = function close() {};
+
+  const ctx = {
+    credentials: {
+      resolve(ref) {
+        return Promise.resolve({ value: ref === 'FEISHU_APP_ID' ? 'app-id' : 'app-secret' });
+      },
+    },
+    agents: { get: () => undefined },
+    agentDefaultModel: {
+      currentSelection() {
+        return { provider: 'deepseek', model: 'default-model' };
+      },
+    },
+    on() {
+      return () => {};
+    },
+    effect(effect) {
+      effects.push(effect());
+    },
+    logger: {
+      warn(message) { logs.push(`warn:${message}`); },
+      info(message) { logs.push(`info:${message}`); },
+    },
+  };
+
+  process.env.DSH_HOME = home;
+  try {
+    apply(ctx);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(typeof readyCallback, 'function');
+    assert.equal(typeof errorCallback, 'function');
+    assert.equal(startParams.eventDispatcher.logger.level, 1);
+    assert.equal(logs.some((message) => message.includes('long connection established')), false);
+
+    readyCallback();
+    assert.equal(logs.filter((message) => message.includes('long connection established')).length, 1);
+
+    errorCallback(new Error('FEISHU_WS_HANDSHAKE_FAILED: secret transport details'));
+    assert.equal(logs.some((message) => message.includes('FEISHU_WS_HANDSHAKE_FAILED')), true);
+    assert.equal(logs.some((message) => message.includes('secret transport details')), false);
+    effects.at(-1)?.();
+  } finally {
+    WSClient.prototype.start = originalStart;
+    WSClient.prototype.close = originalClose;
+    if (previousHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('plugin: restores the session-to-chat index during startup', () => {
+  const indexed = createIndexedBindings({
+    entries() {
+      return [['chat-1', { projectPath: '/work/project', sessionId: 'session-1' }]];
+    },
+    get() { return undefined; },
+    bind() {},
+    clearSession() {},
+    unbind() {},
+    clear() {},
+  });
+
+  assert.equal(indexed.chatIdForSession('session-1'), 'chat-1');
 });

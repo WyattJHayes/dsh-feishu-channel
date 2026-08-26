@@ -30,13 +30,51 @@ function createMemoryBindings(initial = {}) {
 }
 
 function fakeAgent(id, overrides = {}) {
-  return {
+  const listeners = new Map();
+  const eventContext = {
+    on(name, listener) {
+      const handlers = listeners.get(name) ?? new Set();
+      handlers.add(listener);
+      listeners.set(name, handlers);
+      return () => handlers.delete(listener);
+    },
+    emit(name, payload) {
+      for (const listener of listeners.get(name) ?? []) listener(payload);
+    },
+  };
+  const suppliedFollowup = overrides.followup ?? (async () => {});
+  const agent = {
     id,
-    session: { id, events: [] },
-    followup: async () => {},
-    whenIdle: async () => {},
-    cancel: () => {},
+    session: {
+      id,
+      events: [],
+      append(type, data) {
+        this.events.push({ type, data });
+      },
+    },
     ...overrides,
+    followup: async function followup(message) {
+      const result = await suppliedFollowup.call(this, message);
+      const turns = this.session.events
+        .filter((event) => event?.type === 'turn/start' && Number.isSafeInteger(event.data?.turn))
+        .map((event) => event.data.turn);
+      this.ctx?.emit?.('agent/inbox/claimed', {
+        message,
+        turn: turns.at(-1) ?? 1,
+      });
+      return result;
+    },
+    whenIdle: overrides.whenIdle ?? (async () => {}),
+    cancel: overrides.cancel ?? (() => {}),
+    ctx: overrides.ctx ?? eventContext,
+  };
+  return agent;
+}
+
+function remotePermissionPresets() {
+  return {
+    apply() {},
+    current() { return 'workspace-write'; },
   };
 }
 
@@ -64,6 +102,7 @@ function fakeAgentContext(overrides = {}) {
         return { provider: 'deepseek', model: 'default-model' };
       },
     },
+    permissionPresets: remotePermissionPresets(),
   };
 }
 
@@ -167,6 +206,35 @@ test('driver preserves the binding when resume fails', async () => {
   assert.equal(bindings.get('chat-1').sessionId, 'session-1');
 });
 
+test('driver removes ownership when persisting a new session fails', async () => {
+  let disposeCalls = 0;
+  const handle = {
+    agent: fakeAgent('session-1'),
+    dispose() {
+      disposeCalls += 1;
+    },
+  };
+  const driver = createAgentDriver(fakeAgentContext({
+    create: async () => handle,
+  }), {
+    bindings: {
+      get() {
+        return { projectPath: '/work/project' };
+      },
+      bind() {
+        throw new Error('persist failed');
+      },
+    },
+    config: {},
+  });
+
+  await assert.rejects(() => driver.ensureSession('chat-1'), /FEISHU_SESSION_CREATE_FAILED/);
+  assert.equal(disposeCalls, 1);
+
+  await driver.dispose();
+  assert.equal(disposeCalls, 1);
+});
+
 test('driver revalidates a persisted project binding before resuming or creating', async () => {
   let createCalled = false;
   let resumeCalled = false;
@@ -195,6 +263,12 @@ test('driver setup mounts the Agent preset before registering scoped listeners',
   const registrations = [];
   const setupCalls = [];
   const agentCtx = {
+    agent: {
+      session: {
+        events: [],
+        append() {},
+      },
+    },
     on(name, listener) {
       setupCalls.push(`on:${name}`);
       registrations.push({ name, listener });
@@ -208,6 +282,7 @@ test('driver setup mounts the Agent preset before registering scoped listeners',
       setupCalls.push('mount');
     },
   };
+  const permissionPresets = remotePermissionPresets();
   const approvalBridge = {
     remember() {},
     createListener() {
@@ -221,6 +296,7 @@ test('driver setup mounts the Agent preset before registering scoped listeners',
     selection: { current: { provider: 'deepseek', model: 'model-1' } },
     approvalBridge,
     agentPresets,
+    permissionPresets,
   }), undefined);
   assert.equal(setupCalls[0], 'mount');
   assert.deepEqual(registrations.map((entry) => entry.name), [
@@ -259,9 +335,11 @@ test('driver runs prompts FIFO and returns the result for each turn', async () =
   });
   const ctx = fakeAgentContext({ get: () => agent });
   const driver = createAgentDriver(ctx, {
-    bindings: createMemoryBindings({ projectPath: '/work/project', sessionId: 'session-1' }),
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
     config: {},
   });
+
+  ctx.agents.create = async () => ({ agent });
 
   const first = driver.enqueuePrompt('chat-1', 'first');
   const second = driver.enqueuePrompt('chat-1', 'second');
@@ -274,6 +352,19 @@ test('driver runs prompts FIFO and returns the result for each turn', async () =
   assert.deepEqual(order, ['start:first', 'end:first', 'start:second', 'end:second']);
 });
 
+test('driver rejects a live session that was not created or resumed by Feishu', async () => {
+  const agent = fakeAgent('session-1');
+  const driver = createAgentDriver(fakeAgentContext({ get: () => agent }), {
+    bindings: createMemoryBindings({ projectPath: '/work/project', sessionId: 'session-1' }),
+    config: {},
+  });
+
+  await assert.rejects(
+    () => driver.ensureSession('chat-1'),
+    /FEISHU_AGENT_UNAVAILABLE: live Agent is not managed by Feishu; use \/new/,
+  );
+});
+
 test('driver cancel aborts active Agent and clears pending approvals', async () => {
   const calls = [];
   let releaseFollowup;
@@ -283,8 +374,10 @@ test('driver cancel aborts active Agent and clears pending approvals', async () 
       releaseFollowup = resolve;
     }),
   });
-  const driver = createAgentDriver(fakeAgentContext({ get: () => agent }), {
-    bindings: createMemoryBindings({ projectPath: '/work/project', sessionId: 'session-1' }),
+  const ctx = fakeAgentContext({ get: () => agent });
+  ctx.agents.create = async () => ({ agent });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
     approvalBridge: { cancelSession: (id) => calls.push(id) },
   });
 
@@ -312,8 +405,10 @@ test('driver cancel skips queued prompts without invoking the Agent', async () =
       }
     },
   });
-  const driver = createAgentDriver(fakeAgentContext({ get: () => agent }), {
-    bindings: createMemoryBindings({ projectPath: '/work/project', sessionId: 'session-1' }),
+  const ctx = fakeAgentContext({ get: () => agent });
+  ctx.agents.create = async () => ({ agent });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
     approvalBridge: { cancelSession() {} },
   });
 
@@ -331,11 +426,18 @@ test('driver cancel skips queued prompts without invoking the Agent', async () =
 
 test('driver cancel during create cancels the new Agent before followup', async () => {
   const calls = [];
+  let disposeCalls = 0;
   let releaseCreate;
   const agent = fakeAgent('session-1', {
     followup: async () => calls.push('followup'),
     cancel: (...args) => calls.push(args),
   });
+  const handle = {
+    agent,
+    dispose() {
+      disposeCalls += 1;
+    },
+  };
   let liveAgent;
   const driver = createAgentDriver({
     agents: {
@@ -345,7 +447,7 @@ test('driver cancel during create cancels the new Agent before followup', async 
           releaseCreate = resolve;
         });
         liveAgent = agent;
-        return { agent };
+        return handle;
       },
     },
     agentDefaultModel: {
@@ -353,6 +455,7 @@ test('driver cancel during create cancels the new Agent before followup', async 
         return { provider: 'deepseek', model: 'default-model' };
       },
     },
+    permissionPresets: remotePermissionPresets(),
   }, {
     bindings: createMemoryBindings({ projectPath: '/work/project' }),
     approvalBridge: { cancelSession: (id) => calls.push(`approval:${id}`) },
@@ -371,6 +474,9 @@ test('driver cancel during create cancels the new Agent before followup', async 
     [{ kind: 'user' }, { keepInbox: true }],
     'approval:session-1',
   ]);
+  assert.equal(disposeCalls, 1);
+  await driver.dispose();
+  assert.equal(disposeCalls, 1);
 });
 
 test('driver cancel during resume cancels the resumed Agent before followup', async () => {
@@ -397,6 +503,7 @@ test('driver cancel during resume cancels the resumed Agent before followup', as
         return { provider: 'deepseek', model: 'default-model' };
       },
     },
+    permissionPresets: remotePermissionPresets(),
   }, {
     bindings: createMemoryBindings({
       projectPath: '/work/project',

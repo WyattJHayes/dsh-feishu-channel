@@ -33,6 +33,12 @@ function createAgentContext(agent) {
         return { provider: 'deepseek', model: 'default-model' };
       },
     },
+    permissionPresets: {
+      apply() {},
+      current() {
+        return 'workspace-write';
+      },
+    },
   };
 }
 
@@ -40,9 +46,22 @@ function createAgent() {
   let releaseFirst;
   let seq = 0;
   const followups = [];
+  const listeners = new Map();
+  const eventContext = {
+    on(name, listener) {
+      const handlers = listeners.get(name) ?? new Set();
+      handlers.add(listener);
+      listeners.set(name, handlers);
+      return () => handlers.delete(listener);
+    },
+    emit(name, payload) {
+      for (const listener of listeners.get(name) ?? []) listener(payload);
+    },
+  };
   const agent = {
     id: 'uncreated',
     session: { id: 'uncreated', events: [] },
+    ctx: eventContext,
     cancel() {},
     async whenIdle() {},
     async followup(message) {
@@ -63,6 +82,7 @@ function createAgent() {
         },
         { seq: seq++, type: 'turn/end', data: { turn, reason: { kind: 'completed' } } },
       );
+      this.ctx.emit('agent/inbox/claimed', { message, turn });
     },
   };
   return {

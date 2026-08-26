@@ -39,7 +39,7 @@ dsh credentials set FEISHU_APP_SECRET <your-app-secret>
 
 私聊至少需要 `allowedOpenIds`。群聊同时需要发送者的 `open_id` 和群的 `chat_id`。项目路径必须是允许根目录内的已有目录，插件会按真实路径检查符号链接和路径边界；不会默认放行当前目录、用户目录或整个文件系统。
 
-可选配置包括 `stateFile`、`approvalTimeoutMs`、`progressIntervalMs`、`maxProgressMessages` 和 `maxPromptLength`。`stateFile` 只能落在 `$DSH_HOME/cache` 内。
+可选配置包括 `stateFile`、`approvalTimeoutMs`、`progressIntervalMs`、`maxProgressMessages`、`maxPromptLength`、`dedupeCapacity`、`dedupeTtlMs`、`agentOperationTimeoutMs`、`whenIdleTimeoutMs` 和 `cancelTimeoutMs`。超时配置会被限制在有限范围内，`stateFile` 只能落在 `$DSH_HOME/cache` 内。
 
 ## 使用
 
@@ -58,7 +58,7 @@ dsh credentials set FEISHU_APP_SECRET <your-app-secret>
 
 ## 安全边界
 
-白名单成员拥有所选 Agent preset 在本机上的全部能力，应把飞书接入视为把终端交给白名单成员。建议使用受限 preset，并只配置必要的 `allowedProjectRoots`。
+白名单成员拥有所选 Agent preset 在本机上的全部能力，应把飞书接入视为把终端交给白名单成员。建议使用受限 preset，并只配置必要的 `allowedProjectRoots`。插件创建或恢复会话前会强制使用 `workspace-write` 与 `ask`；已有但无法证明由插件管理的 live Agent 不会被复用，请使用 `/new`。
 
 文件删除、外部写入、发布推送、强制 Git 操作、系统级或高权限命令需要一次性审批；未知工具、无法判断的命令和越出项目目录的访问会拒绝。审批 token 只能由原 chat 使用一次，不能跨 chat 复用。
 

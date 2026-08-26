@@ -5,13 +5,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { classifyToolExecution, createRiskListener } from '../lib/risk-policy.js';
 
-test('risk policy allows safe project reads and local tests', () => {
+test('risk policy allows safe project reads but asks before running project scripts', () => {
   assert.deepEqual(classifyToolExecution({ name: 'fs_read', arguments: { path: '/work/src/a.js' } }, {
     projectPath: '/work',
   }), { kind: 'allow' });
-  assert.deepEqual(classifyToolExecution({ name: 'bash', arguments: { command: 'pnpm test' } }, {
+  assert.equal(classifyToolExecution({ name: 'bash', arguments: { command: 'pnpm test' } }, {
     projectPath: '/work',
-  }), { kind: 'allow' });
+  }).kind, 'ask');
 });
 
 test('risk policy inspects absolute paths assigned with command options', () => {
@@ -27,7 +27,14 @@ test('risk policy inspects absolute paths assigned with command options', () => 
     arguments: { command: 'git diff --output=/work/report.diff' },
   }, {
     projectPath: '/work',
-  }).kind, 'allow');
+  }).kind, 'ask');
+
+  assert.equal(classifyToolExecution({
+    name: 'bash',
+    arguments: { command: 'git diff --output=../../outside/report.diff' },
+  }, {
+    projectPath: '/work/project',
+  }).kind, 'deny');
 });
 
 test('risk policy asks for destructive or external commands', () => {
@@ -49,6 +56,12 @@ test('risk policy asks for destructive or external commands', () => {
   assert.equal(classifyToolExecution({ name: 'bash', arguments: { command: 'rm -rf /work/build' } }, {
     projectPath: '/work',
   }).kind, 'ask');
+  assert.equal(classifyToolExecution({ name: 'bash', arguments: { command: 'node test' } }, {
+    projectPath: '/work',
+  }).kind, 'ask');
+  assert.equal(classifyToolExecution({ name: 'bash', arguments: { command: 'git add src/index.js' } }, {
+    projectPath: '/work',
+  }).kind, 'ask');
 });
 
 test('risk policy requires approval for git commit amend', () => {
@@ -57,7 +70,7 @@ test('risk policy requires approval for git commit amend', () => {
     arguments: { command: 'git commit -m update' },
   }, {
     projectPath: '/work',
-  }).kind, 'allow');
+  }).kind, 'ask');
 
   const result = classifyToolExecution({
     name: 'bash',
@@ -82,6 +95,31 @@ test('risk policy denies an absolute path outside the project', () => {
   });
 
   assert.equal(result.kind, 'deny');
+});
+
+test('risk policy resolves relative file paths and ignores non-path content', () => {
+  assert.equal(classifyToolExecution({
+    name: 'write',
+    arguments: { path: '../outside.txt', content: '/work/project' },
+  }, {
+    projectPath: '/work/project',
+  }).kind, 'deny');
+
+  assert.equal(classifyToolExecution({
+    name: 'write',
+    arguments: { path: '/work/project/inside.txt', content: '/outside/decoy' },
+  }, {
+    projectPath: '/work/project',
+  }).kind, 'allow');
+});
+
+test('risk policy rejects relative paths in safe git reads', () => {
+  assert.equal(classifyToolExecution({
+    name: 'bash',
+    arguments: { command: 'git diff --no-index ../outside.txt inside.txt' },
+  }, {
+    projectPath: '/work/project',
+  }).kind, 'deny');
 });
 
 test('risk policy denies compound commands instead of prefix allowing them', () => {
@@ -126,6 +164,47 @@ test('risk policy uses canonical paths to reject symlink escapes and allow safe 
   await rm(outside, { recursive: true, force: true });
 });
 
+test('risk policy rejects dangling symlink targets before allowing a write', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'risk-root-'));
+  const project = join(root, 'project');
+  const outside = join(root, 'outside');
+  await mkdir(project);
+  await symlink(join(outside, 'missing.txt'), join(project, 'dangling-link.txt'));
+
+  assert.equal(classifyToolExecution({
+    name: 'write',
+    arguments: { path: join(project, 'dangling-link.txt') },
+  }, {
+    projectPath: project,
+  }).kind, 'deny');
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test('risk policy does not allow Git commands that mutate refs or write output', () => {
+  assert.equal(classifyToolExecution({
+    name: 'bash',
+    arguments: { command: 'git branch new-feature' },
+  }, {
+    projectPath: '/work',
+  }).kind, 'ask');
+
+  assert.equal(classifyToolExecution({
+    name: 'bash',
+    arguments: { command: 'git diff --output=report.txt' },
+  }, {
+    projectPath: '/work',
+  }).kind, 'ask');
+});
+
+test('risk policy asks before all known Git mutation commands', () => {
+  for (const command of ['git checkout feature', 'git switch feature', 'git merge feature', 'git cherry-pick abc123', 'git revert abc123', 'git apply patch.diff']) {
+    assert.equal(classifyToolExecution({ name: 'bash', arguments: { command } }, {
+      projectPath: '/work',
+    }).kind, 'ask', command);
+  }
+});
+
 test('risk policy denies unknown tools and ambiguous shell expansion', () => {
   assert.equal(classifyToolExecution({ name: 'unknown_tool', arguments: { path: '/work/a.js' } }, {
     projectPath: '/work',
@@ -162,10 +241,10 @@ test('risk listener only calls next for allow decisions and remembers asks', asy
   });
   let nextCalls = 0;
 
-  assert.equal(await listener({ name: 'bash', arguments: { command: 'pnpm test' } }, async () => {
+  const script = await listener({ name: 'bash', arguments: { command: 'pnpm test' } }, async () => {
     nextCalls += 1;
-    return 'ok';
-  }), 'ok');
+    return 'unexpected';
+  });
 
   const ask = await listener({
     name: 'bash',
@@ -182,11 +261,12 @@ test('risk listener only calls next for allow decisions and remembers asks', asy
 
   assert.equal(ask.kind, 'ask');
   assert.equal(deny.kind, 'deny');
-  assert.equal(nextCalls, 1);
-  assert.equal(remembered.length, 1);
+  assert.equal(nextCalls, 0);
+  assert.equal(script.kind, 'ask');
+  assert.equal(remembered.length, 2);
   assert.deepEqual(remembered[0].summary, {
     toolName: 'bash',
-    riskCategory: 'git-publish',
+    riskCategory: 'script-command',
     projectRelativePath: '.',
   });
 });

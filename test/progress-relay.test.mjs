@@ -69,12 +69,24 @@ test('progress relay projects session status without allowing outside mutation',
 test('progress relay rate limits messages while preserving in-memory status', async () => {
   let currentTime = 0;
   const sent = [];
+  const timers = [];
+  const scheduler = {
+    setTimeout(callback, delay) {
+      const timer = { callback, delay, unref() {} };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) {
+      timer.cancelled = true;
+    },
+  };
   const relay = createProgressRelay({
     getChatId: () => 'chat-1',
     sendText: async (_chatId, text) => sent.push(text),
     minIntervalMs: 10,
     maxMessages: 10,
     now: () => currentTime,
+    scheduler,
   });
   const session = { id: 'session-1' };
 
@@ -84,8 +96,11 @@ test('progress relay rate limits messages while preserving in-memory status', as
   await flushAsyncSends();
 
   assert.deepEqual(sent, ['Agent turn started.']);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 5);
   assert.equal(relay.getStatus('session-1').phase, 'running_tool');
   assert.equal(relay.getStatus('session-1').lastSummary, 'Calling tool: bash.');
+  relay.close();
 });
 
 test('progress relay stops sending after maxMessages but keeps status current', async () => {
@@ -262,6 +277,74 @@ test('progress relay flushes a scheduled summary even when the injected clock is
   relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } });
 
   await new Promise((resolve) => setTimeout(resolve, 35));
+  assert.deepEqual(sent, ['Agent turn started.', 'Agent turn ended.']);
+  relay.close();
+});
+
+test('progress relay resets the message budget and pending summary for every turn', async () => {
+  const sent = [];
+  const relay = createProgressRelay({
+    getChatId: () => 'chat-1',
+    sendText: async (_chatId, text) => sent.push(text),
+    minIntervalMs: 1000,
+    maxMessages: 1,
+  });
+
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } });
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'tool/call', data: { turn: 1, name: 'bash' } });
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 2 } });
+  await flushAsyncSends();
+
+  const status = relay.getStatus('session-1');
+  assert.deepEqual(sent, ['Agent turn started.', 'Agent turn started.']);
+  assert.equal(status.phase, 'running');
+  assert.equal(status.turn, 2);
+  assert.equal(status.messageCount, 1);
+  assert.equal(status.lastSummary, 'Agent turn started.');
+  relay.close();
+});
+
+test('progress relay ignores tracked events for sessions without a chat binding', async () => {
+  const relay = createProgressRelay({
+    getChatId: () => undefined,
+    sendText: async () => assert.fail('unbound session must not send'),
+    minIntervalMs: 0,
+    maxMessages: 10,
+  });
+
+  relay.onSessionEvent({ id: 'desktop-session' }, { type: 'turn/start', data: { turn: 1 } });
+
+  assert.equal(relay.getStatus('desktop-session'), undefined);
+  relay.close();
+});
+
+test('progress relay accepts an injected scheduler for bounded rate limiting', async () => {
+  const sent = [];
+  const timers = [];
+  const scheduler = {
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length - 1;
+    },
+    clearTimeout(timer) {
+      timers[timer] = undefined;
+    },
+  };
+  const relay = createProgressRelay({
+    getChatId: () => 'chat-1',
+    sendText: async (_chatId, text) => sent.push(text),
+    minIntervalMs: 10,
+    maxMessages: 10,
+    now: () => 0,
+    scheduler,
+  });
+
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } });
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } });
+  assert.equal(timers[0].delay, 10);
+  timers[0].callback();
+  await flushAsyncSends();
+
   assert.deepEqual(sent, ['Agent turn started.', 'Agent turn ended.']);
   relay.close();
 });

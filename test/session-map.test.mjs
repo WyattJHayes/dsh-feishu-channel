@@ -229,3 +229,42 @@ test('session map does not persist fields injected through get after a later sav
   });
   await rm(dir, { recursive: true, force: true });
 });
+
+test('session map preserves an unsupported primary version and writes recovery state instead', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'feishu-state-'));
+  const file = join(dir, 'state.json');
+  const original = JSON.stringify({ version: 99, bindings: { oc_1: { projectPath: '/tmp/project' } } });
+  writeFileSync(file, original, 'utf8');
+
+  const state = createSessionMap(file, { now: () => '2026-08-26T00:00:00.000Z' });
+  state.bind('oc_2', { projectPath: '/tmp/other-project' });
+
+  assert.equal(readFileSync(file, 'utf8'), original);
+  assert.equal(state.recoveredPath, file + '.recovered');
+  assert.deepEqual(JSON.parse(readFileSync(file + '.recovered', 'utf8')), {
+    version: 1,
+    bindings: {
+      oc_2: {
+        projectPath: '/tmp/other-project',
+        updatedAt: '2026-08-26T00:00:00.000Z',
+      },
+    },
+  });
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('session map preserves a malformed versioned primary instead of silently dropping bindings', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'feishu-state-'));
+  const file = join(dir, 'state.json');
+  const original = JSON.stringify({ version: 1, bindings: { oc_1: { projectPath: 42 } } });
+  writeFileSync(file, original, 'utf8');
+
+  const state = createSessionMap(file);
+  state.bind('oc_2', { projectPath: '/tmp/other-project' });
+
+  assert.equal(readFileSync(file, 'utf8'), original);
+  assert.equal(state.recoveredPath, file + '.recovered');
+  assert.equal(JSON.parse(readFileSync(file + '.recovered', 'utf8')).bindings.oc_1, undefined);
+  assert.equal(JSON.parse(readFileSync(file + '.recovered', 'utf8')).bindings.oc_2.projectPath, '/tmp/other-project');
+  await rm(dir, { recursive: true, force: true });
+});
