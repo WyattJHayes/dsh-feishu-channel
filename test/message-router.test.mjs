@@ -66,12 +66,14 @@ function makeRouterOptions(overrides = {}) {
     driver: {
       promptCalls: 0,
       promptTexts: [],
+      promptKeys: [],
       cancelCalls: [],
       resetCalls: [],
       statusCalls: [],
-      enqueuePrompt(chatId, text) {
+      enqueuePrompt(conversationKey, text) {
         this.promptCalls += 1;
         this.promptTexts.push(text);
+        this.promptKeys.push(conversationKey);
         return { position: 1, promise: Promise.resolve({ kind: 'text', text: `done:${text}` }) };
       },
       cancel(chatId) {
@@ -231,13 +233,45 @@ test('router passes each group sender to its own control response', async () => 
   ]);
 });
 
+test('router isolates sender-mode group prompts by sender', async () => {
+  const options = makeRouterOptions({
+    config: { allowedOpenIds: ['user-a', 'user-b'], groupOutputMode: 'sender' },
+  });
+  options.projectPolicy.resolve = (path) => ({ ok: true, path });
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({ eventId: 'e-project-a', chatId: 'chat-1', openId: 'user-a', chatType: 'group', text: '/project /work/project' });
+  await router.handleMessage({ eventId: 'e-project-b', chatId: 'chat-1', openId: 'user-b', chatType: 'group', text: '/project /work/project' });
+  await router.handleMessage({ eventId: 'e-prompt-a', chatId: 'chat-1', openId: 'user-a', chatType: 'group', text: 'private-a' });
+  await router.handleMessage({ eventId: 'e-prompt-b', chatId: 'chat-1', openId: 'user-b', chatType: 'group', text: 'private-b' });
+
+  assert.equal(options.driver.promptKeys.length, 2);
+  assert.notEqual(options.driver.promptKeys[0], 'chat-1');
+  assert.notEqual(options.driver.promptKeys[0], options.driver.promptKeys[1]);
+});
+
+test('router drops sender-mode group messages without a sender identity', async () => {
+  const options = makeRouterOptions({
+    config: { allowedOpenIds: ['user-a'], groupOutputMode: 'sender' },
+  });
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({ eventId: 'e-missing-sender', chatId: 'chat-1', chatType: 'group', text: 'private prompt' });
+
+  assert.equal(options.driver.promptCalls, 0);
+  assert.equal(options.sendCalls, 0);
+});
+
 test('router keeps queued group prompt results with their originating senders', async () => {
   const sent = [];
   const runs = new Map();
   const options = makeRouterOptions({
     config: { allowedOpenIds: ['user-a', 'user-b'] },
     sendText: async (chatId, text, recipient) => sent.push({ chatId, text, recipient }),
-    bindings: createMemoryBindings({ 'chat-1': { projectPath: '/work/project' } }),
+    bindings: createMemoryBindings({
+      '["group-sender","chat-1","user-a"]': { projectPath: '/work/project' },
+      '["group-sender","chat-1","user-b"]': { projectPath: '/work/project' },
+    }),
     driver: {
       enqueuePrompt(_chatId, text, recipient) {
         const deferred = createDeferred();

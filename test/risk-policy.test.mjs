@@ -237,6 +237,49 @@ test('risk policy requires approval for plain git diff because local Git config 
   assert.equal(result.reason, 'RISK_POLICY_GIT_EXTERNAL_DIFF');
 });
 
+test('risk policy requires approval before Git reads that consult repository configuration', () => {
+  for (const command of ['git status', 'git log --oneline', 'git show HEAD', 'git branch']) {
+    const result = classifyToolExecution({ name: 'bash', arguments: { command } }, {
+      projectPath: '/work',
+    });
+
+    assert.equal(result.kind, 'ask', command);
+    assert.equal(result.reason, 'RISK_POLICY_GIT_CONFIG_READ', command);
+  }
+});
+
+test('risk policy denies writes to Git control metadata', () => {
+  assert.equal(classifyToolExecution({
+    name: 'write',
+    arguments: { path: '/work/.git/config' },
+  }, {
+    projectPath: '/work',
+  }).kind, 'deny');
+
+  assert.equal(classifyToolExecution({
+    name: 'str_replace_editor',
+    arguments: { command: 'create', path: '/work/.git/hooks/pre-commit' },
+  }, {
+    projectPath: '/work',
+  }).kind, 'deny');
+});
+
+test('risk policy denies Git metadata writes through an in-project symlink alias', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'risk-root-'));
+  const project = join(root, 'project');
+  await mkdir(join(project, '.git'), { recursive: true });
+  await symlink(join(project, '.git'), join(project, 'metadata-alias'));
+
+  assert.equal(classifyToolExecution({
+    name: 'write',
+    arguments: { path: join(project, 'metadata-alias', 'config') },
+  }, {
+    projectPath: project,
+  }).kind, 'deny');
+
+  await rm(root, { recursive: true, force: true });
+});
+
 test('risk policy asks before all known Git mutation commands', () => {
   for (const command of ['git checkout feature', 'git switch feature', 'git merge feature', 'git cherry-pick abc123', 'git revert abc123', 'git apply patch.diff']) {
     assert.equal(classifyToolExecution({ name: 'bash', arguments: { command } }, {

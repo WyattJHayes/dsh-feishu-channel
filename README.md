@@ -41,7 +41,7 @@ dsh credentials set FEISHU_APP_SECRET <your-app-secret>
 
 群聊回复默认只发给通过白名单的发送者，避免群内其他成员旁观 Agent 输出。确实需要共享群聊结果时，显式设置 `groupOutputMode: group`，并确认群成员都属于可信输出受众。未授权事件不会回发拒绝消息，以避免身份探测和出站队列消耗。
 
-可选配置包括 `stateFile`、`groupOutputMode`、`approvalTimeoutMs`、`progressIntervalMs`、`maxProgressMessages`、`maxPromptLength`、`maxQueuedPrompts`、`maxOutboundQueue`、`dedupeCapacity`、`dedupeTtlMs`、`agentOperationTimeoutMs`、`whenIdleTimeoutMs` 和 `cancelTimeoutMs`。数值配置有保守上限，`maxQueuedPrompts` 默认是 8，`maxOutboundQueue` 默认是 64，`stateFile` 只能落在 `$DSH_HOME/cache` 内。
+可选配置包括 `stateFile`、`groupOutputMode`、`approvalTimeoutMs`、`progressIntervalMs`、`maxProgressMessages`、`maxPromptLength`、`maxQueuedPrompts`、`maxOutboundQueue`、`maxOutboundTextLength`、`maxOutboundChunks`、`dedupeCapacity`、`dedupeTtlMs`、`agentOperationTimeoutMs`、`whenIdleTimeoutMs` 和 `cancelTimeoutMs`。数值配置有保守上限，`maxQueuedPrompts` 默认是 8，`maxOutboundQueue` 默认是 64，`maxOutboundTextLength` 默认是 12000，`maxOutboundChunks` 默认是 4，`stateFile` 只能落在 `$DSH_HOME/cache` 内。
 
 ## 使用
 

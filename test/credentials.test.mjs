@@ -35,6 +35,8 @@ test('config: normalizes allowed project roots and numeric limits', () => {
   assert.equal(config.maxQueuedPrompts, 8);
   assert.equal(config.groupOutputMode, 'sender');
   assert.equal(config.maxOutboundQueue, 64);
+  assert.equal(config.maxOutboundTextLength, 12000);
+  assert.equal(config.maxOutboundChunks, 4);
 });
 
 test('config: rejects numeric limits that exceed remote-safe bounds', () => {
@@ -42,11 +44,15 @@ test('config: rejects numeric limits that exceed remote-safe bounds', () => {
     approvalTimeoutMs: 3_600_001,
     maxPromptLength: 120_001,
     maxQueuedPrompts: 101,
+    maxOutboundTextLength: 120_001,
+    maxOutboundChunks: 65,
   });
 
   assert.match(errors.join('; '), /approvalTimeoutMs must not exceed 3600000/);
   assert.match(errors.join('; '), /maxPromptLength must not exceed 120000/);
   assert.match(errors.join('; '), /maxQueuedPrompts must not exceed 100/);
+  assert.match(errors.join('; '), /maxOutboundTextLength must not exceed 120000/);
+  assert.match(errors.join('; '), /maxOutboundChunks must not exceed 64/);
 });
 
 test('config: rejects an unknown group output mode', () => {
@@ -291,6 +297,24 @@ test('agent: reads final assistant text from the completed turn', async () => {
   assert.deepEqual(result, { kind: 'text', text: '运行完成' });
 });
 
+test('agent: caps extracted assistant text with an explicit truncation marker', async () => {
+  const { extractAssistantText } = await import('../lib/index.js');
+
+  assert.equal(
+    extractAssistantText({ content: [{ type: 'text', text: '1234567890' }] }, 9),
+    '1\n[输出已截断]',
+  );
+});
+
+test('agent: keeps a visible truncation marker for a very small output limit', async () => {
+  const { extractAssistantText } = await import('../lib/index.js');
+
+  assert.equal(
+    extractAssistantText({ content: [{ type: 'text', text: '123' }] }, 1),
+    '…',
+  );
+});
+
 test('agent: does not select an unrelated latest turn without a claimed turn', async () => {
   const { getAgentTurnResult } = await import('../lib/index.js');
   const result = getAgentTurnResult([
@@ -520,6 +544,34 @@ test('sender bounds the number of active and queued outbound messages', async ()
   await assert.rejects(() => sender('chat-1', 'second'), /FEISHU_SEND_QUEUE_FULL/);
   releaseFirst({ code: 0 });
   await first;
+});
+
+test('sender bounds final output length and expanded chunk count before queueing', async () => {
+  const { createFeishuSender } = await import('../lib/index.js');
+  const requests = [];
+  const sender = createFeishuSender({
+    resolveCredential: async () => 'test-output-credential',
+    clientFactory: () => ({
+      im: {
+        message: {
+          create: async (request) => {
+            requests.push(request);
+            return { code: 0 };
+          },
+        },
+      },
+    }),
+    timeoutMs: 100,
+    maxOutboundTextLength: 9000,
+    maxOutboundChunks: 2,
+  });
+
+  await sender('chat-1', 'x'.repeat(8000));
+
+  assert.equal(requests.length, 2);
+  const text = requests.map((request) => JSON.parse(request.data.content).text).join('');
+  assert.equal(Array.from(text).length, 7600);
+  assert.match(text, /输出已截断/);
 });
 
 test('sender can target an authorized group sender instead of the shared chat', async () => {
