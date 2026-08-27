@@ -180,6 +180,39 @@ test('router denies empty allowlists before policy, bridge, or driver can run', 
   assert.equal(options.driver.promptCalls, 0);
 });
 
+test('router silently drops unauthorized events without consuming outbound sends', async () => {
+  const options = makeRouterOptions();
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({
+    eventId: 'e-unauthorized',
+    chatId: 'chat-1',
+    openId: 'user-unauthorized',
+    chatType: 'group',
+    text: 'read project secrets',
+  });
+
+  assert.equal(options.sendCalls, 0);
+  assert.equal(options.driver.promptCalls, 0);
+});
+
+test('router registers the authorized sender as the group output target', async () => {
+  const targets = [];
+  const options = makeRouterOptions();
+  options.setOutputTarget = (chatId, target) => targets.push({ chatId, target });
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({
+    eventId: 'e-group',
+    chatId: 'chat-1',
+    openId: 'user-1',
+    chatType: 'group',
+    text: '/status',
+  });
+
+  assert.deepEqual(targets, [{ chatId: 'chat-1', target: { chatType: 'group', openId: 'user-1' } }]);
+});
+
 test('router refuses project rebinding across projects until new clears the session', async () => {
   const bindings = createMemoryBindings({
     'chat-1': { projectPath: '/work/project-a', sessionId: 'session-1' },

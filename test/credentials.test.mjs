@@ -33,6 +33,8 @@ test('config: normalizes allowed project roots and numeric limits', () => {
   assert.equal(config.approvalTimeoutMs, 600000);
   assert.equal(config.progressIntervalMs, 2000);
   assert.equal(config.maxQueuedPrompts, 8);
+  assert.equal(config.groupOutputMode, 'sender');
+  assert.equal(config.maxOutboundQueue, 64);
 });
 
 test('config: rejects numeric limits that exceed remote-safe bounds', () => {
@@ -45,6 +47,12 @@ test('config: rejects numeric limits that exceed remote-safe bounds', () => {
   assert.match(errors.join('; '), /approvalTimeoutMs must not exceed 3600000/);
   assert.match(errors.join('; '), /maxPromptLength must not exceed 120000/);
   assert.match(errors.join('; '), /maxQueuedPrompts must not exceed 100/);
+});
+
+test('config: rejects an unknown group output mode', () => {
+  const { errors } = normalizeConfig({ groupOutputMode: 'everyone' });
+
+  assert.match(errors.join('; '), /groupOutputMode must be either sender or group/);
 });
 
 test('plugin: declares the services used by apply', async () => {
@@ -445,6 +453,56 @@ test('sender serializes concurrent messages and releases the queue after complet
   releaseFirst({ code: 0 });
   await Promise.all([first, second]);
   assert.deepEqual(calls, [1, 2]);
+});
+
+test('sender bounds the number of active and queued outbound messages', async () => {
+  const { createFeishuSender } = await import('../lib/index.js');
+  let releaseFirst;
+  const firstRequest = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const sender = createFeishuSender({
+    resolveCredential: async () => 'test-queue-credential',
+    clientFactory: () => ({
+      im: {
+        message: {
+          create: () => firstRequest,
+        },
+      },
+    }),
+    timeoutMs: 1000,
+    maxQueueSize: 1,
+  });
+
+  const first = sender('chat-1', 'first');
+  await assert.rejects(() => sender('chat-1', 'second'), /FEISHU_SEND_QUEUE_FULL/);
+  releaseFirst({ code: 0 });
+  await first;
+});
+
+test('sender can target an authorized group sender instead of the shared chat', async () => {
+  const { createFeishuSender } = await import('../lib/index.js');
+  const requests = [];
+  const sender = createFeishuSender({
+    resolveCredential: async () => 'test-credential',
+    resolveRecipient: () => ({ receiveId: 'user-1', receiveIdType: 'open_id' }),
+    clientFactory: () => ({
+      im: {
+        message: {
+          create: async (request) => {
+            requests.push(request);
+            return { code: 0 };
+          },
+        },
+      },
+    }),
+    timeoutMs: 100,
+  });
+
+  await sender('chat-1', 'private result');
+
+  assert.deepEqual(requests[0].params, { receive_id_type: 'open_id' });
+  assert.equal(requests[0].data.receive_id, 'user-1');
 });
 
 test('sender retries a retryable 429 response and honors retry-after', async () => {
