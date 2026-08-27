@@ -32,6 +32,19 @@ test('config: normalizes allowed project roots and numeric limits', () => {
   assert.deepEqual(config.allowedProjectRoots, ['/tmp/workspace']);
   assert.equal(config.approvalTimeoutMs, 600000);
   assert.equal(config.progressIntervalMs, 2000);
+  assert.equal(config.maxQueuedPrompts, 8);
+});
+
+test('config: rejects numeric limits that exceed remote-safe bounds', () => {
+  const { errors } = normalizeConfig({
+    approvalTimeoutMs: 3_600_001,
+    maxPromptLength: 120_001,
+    maxQueuedPrompts: 101,
+  });
+
+  assert.match(errors.join('; '), /approvalTimeoutMs must not exceed 3600000/);
+  assert.match(errors.join('; '), /maxPromptLength must not exceed 120000/);
+  assert.match(errors.join('; '), /maxQueuedPrompts must not exceed 100/);
 });
 
 test('plugin: declares the services used by apply', async () => {
@@ -74,7 +87,9 @@ test('agent: setup callback does not return the model selection disposer', async
   };
   const agentPresets = { mount: async () => {} };
   const permissionPresets = {
-    apply() {},
+    apply(_session, _preset, setApproval) {
+      setApproval('ask');
+    },
     current() { return 'workspace-write'; },
   };
 
@@ -105,6 +120,23 @@ test('agent: refuses setup when permission cannot be reduced to workspace-write'
     permissionPresets: {
       apply() {},
       current() { return 'danger-full-access'; },
+    },
+  }), /FEISHU_REMOTE_PERMISSION_FAILED/);
+});
+
+test('agent: refuses setup when permission application does not confirm approval mode', async () => {
+  const { createAgentSetup } = await import('../lib/index.js');
+  const agentCtx = {
+    agent: { session: { events: [], append() {} } },
+    on: () => () => {},
+  };
+
+  await assert.rejects(() => createAgentSetup(agentCtx, {
+    current: { provider: 'deepseek', model: 'model-1' },
+    agentPresets: { mount: async () => {} },
+    permissionPresets: {
+      apply() {},
+      current() { return 'workspace-write'; },
     },
   }), /FEISHU_REMOTE_PERMISSION_FAILED/);
 });
@@ -315,6 +347,23 @@ test('sender rejects a pending Feishu request with a bounded timeout', async () 
     return true;
   });
   release({ code: 0 });
+});
+
+test('sender bounds pending credential lookup and client construction', async () => {
+  const { createFeishuSender } = await import('../lib/index.js');
+  const never = new Promise(() => {});
+  const credentialTimeoutSender = createFeishuSender({
+    resolveCredential: () => never,
+    timeoutMs: 20,
+  });
+  const clientTimeoutSender = createFeishuSender({
+    resolveCredential: async () => 'test-credential',
+    clientFactory: () => never,
+    timeoutMs: 20,
+  });
+
+  await assert.rejects(() => credentialTimeoutSender('chat-1', 'final text'), /FEISHU_SEND_TIMEOUT/);
+  await assert.rejects(() => clientTimeoutSender('chat-1', 'final text'), /FEISHU_SEND_TIMEOUT/);
 });
 
 test('timed HTTP adapter passes a finite timeout to SDK requests', async () => {
@@ -787,5 +836,45 @@ test('plugin: restores the session-to-chat index during startup', () => {
     clear() {},
   });
 
+  assert.equal(indexed.chatIdForSession('session-1'), 'chat-1');
+});
+
+test('session-to-chat index updates only after the underlying write succeeds', () => {
+  const stored = new Map([['chat-1', { projectPath: '/work/project', sessionId: 'session-1' }]]);
+  const indexed = createIndexedBindings({
+    get(chatId) { return stored.get(chatId); },
+    entries() { return [...stored.entries()]; },
+    bind(chatId, binding) {
+      if (chatId === 'chat-2') throw new Error('disk unavailable');
+      stored.set(chatId, binding);
+    },
+    clearSession() { return false; },
+    unbind() { return false; },
+    clear() { return 0; },
+  });
+
+  assert.throws(
+    () => indexed.bind('chat-2', { projectPath: '/work/other', sessionId: 'session-2' }),
+    /disk unavailable/,
+  );
+  assert.equal(indexed.chatIdForSession('session-1'), 'chat-1');
+  assert.equal(indexed.chatIdForSession('session-2'), undefined);
+});
+
+test('session-to-chat index rejects assigning one session to different chats', () => {
+  const stored = new Map([['chat-1', { projectPath: '/work/project', sessionId: 'session-1' }]]);
+  const indexed = createIndexedBindings({
+    get(chatId) { return stored.get(chatId); },
+    entries() { return [...stored.entries()]; },
+    bind(chatId, binding) { stored.set(chatId, binding); },
+    clearSession() { return false; },
+    unbind() { return false; },
+    clear() { return 0; },
+  });
+
+  assert.throws(
+    () => indexed.bind('chat-2', { projectPath: '/work/other', sessionId: 'session-1' }),
+    /FEISHU_SESSION_ALREADY_BOUND/,
+  );
   assert.equal(indexed.chatIdForSession('session-1'), 'chat-1');
 });

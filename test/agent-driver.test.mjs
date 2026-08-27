@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile as execFileCallback } from 'node:child_process';
+import { promisify } from 'node:util';
 
 import { createAgentDriver, createAgentSetup } from '../lib/agent-driver.js';
+
+const execFile = promisify(execFileCallback);
 
 function createMemoryBindings(initial = {}) {
   const map = new Map();
@@ -73,7 +77,9 @@ function fakeAgent(id, overrides = {}) {
 
 function remotePermissionPresets() {
   return {
-    apply() {},
+    apply(_session, _preset, setApproval) {
+      setApproval('ask');
+    },
     current() { return 'workspace-write'; },
   };
 }
@@ -544,4 +550,147 @@ test('driver reset cancels the current Agent and preserves project binding', asy
     projectPath: '/work/project',
     model: { provider: 'deepseek', model: 'model-1' },
   });
+});
+
+test('driver waits for reset cleanup before starting a prompt for the same chat', async () => {
+  let releaseDispose;
+  const oldAgent = fakeAgent('session-1');
+  const newAgent = fakeAgent('session-2');
+  const oldHandle = {
+    agent: oldAgent,
+    dispose() {
+      return new Promise((resolve) => {
+        releaseDispose = resolve;
+      });
+    },
+  };
+  const newHandle = { agent: newAgent, dispose() {} };
+  const followups = [];
+  let liveAgent;
+  oldAgent.followup = async () => followups.push('session-1');
+  newAgent.followup = async () => followups.push('session-2');
+  const ctx = fakeAgentContext({
+    get: () => liveAgent,
+    resume: async () => {
+      liveAgent = oldAgent;
+      return oldHandle;
+    },
+    create: async () => {
+      liveAgent = newAgent;
+      return newHandle;
+    },
+  });
+  const bindings = createMemoryBindings({ projectPath: '/work/project', sessionId: 'session-1' });
+  const driver = createAgentDriver(ctx, { bindings, config: {} });
+
+  await driver.ensureSession('chat-1');
+  const reset = driver.reset('chat-1');
+  await new Promise((resolve) => setImmediate(resolve));
+  const prompt = driver.enqueuePrompt('chat-1', 'after-reset').then(
+    (result) => ({ result }),
+    (error) => ({ error }),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(followups, []);
+
+  releaseDispose();
+  await reset;
+  const outcome = await prompt;
+  assert.equal(outcome.error, undefined);
+  assert.deepEqual(followups, ['session-2']);
+  await driver.dispose();
+});
+
+test('driver keeps the process alive until a pending followup reaches its configured timeout', async () => {
+  const program = `
+    import { createAgentDriver } from './lib/agent-driver.js';
+    const agent = {
+      id: 'session-1',
+      session: { events: [] },
+      followup() { return new Promise(() => {}); },
+      whenIdle: async () => {},
+      cancel() {},
+      ctx: { on() { return () => {}; } },
+    };
+    let binding = { projectPath: '/work/project' };
+    const driver = createAgentDriver({
+      agents: {
+        get(id) { return id === 'session-1' ? agent : undefined; },
+        async create() { return { agent }; },
+      },
+      agentDefaultModel: {
+        currentSelection() { return { provider: 'deepseek', model: 'default-model' }; },
+      },
+      permissionPresets: {
+        apply() {},
+        current() { return 'workspace-write'; },
+      },
+    }, {
+      bindings: {
+        get() { return binding; },
+        bind(_chatId, next) { binding = next; },
+        clearSession() {},
+      },
+      config: { agentOperationTimeoutMs: 15 },
+    });
+    driver.enqueuePrompt('chat-1', 'run').then(
+      () => console.log('unexpected-success'),
+      (error) => console.log(error.message),
+    );
+  `;
+  const result = await execFile(process.execPath, ['--input-type=module', '--eval', program], {
+    cwd: process.cwd(),
+    timeout: 1000,
+  });
+
+  assert.equal(result.stdout.trim(), 'FEISHU_AGENT_FOLLOWUP_TIMEOUT');
+});
+
+test('driver refuses a tainted managed session before considering its live Agent', async () => {
+  let followups = 0;
+  const agent = fakeAgent('session-1', {
+    followup: async () => {
+      followups += 1;
+      throw new Error('backend failure');
+    },
+  });
+  const ctx = fakeAgentContext({
+    get: () => agent,
+    create: async () => ({ agent }),
+  });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: {},
+  });
+
+  await assert.rejects(() => driver.enqueuePrompt('chat-1', 'first'), /FEISHU_AGENT_FOLLOWUP_FAILED/);
+  await assert.rejects(
+    () => driver.enqueuePrompt('chat-1', 'second'),
+    /FEISHU_AGENT_UNAVAILABLE: the bound Agent requires \/new before reuse/,
+  );
+  assert.equal(followups, 1);
+  await driver.dispose();
+});
+
+test('driver disposes an owned handle when its Agent is no longer live', async () => {
+  let disposeCalls = 0;
+  const agent = fakeAgent('session-1');
+  const ctx = fakeAgentContext({
+    get: () => undefined,
+    create: async () => ({
+      agent,
+      dispose() {
+        disposeCalls += 1;
+      },
+    }),
+  });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: {},
+  });
+
+  await assert.rejects(() => driver.enqueuePrompt('chat-1', 'run'), /FEISHU_AGENT_NOT_LIVE/);
+  assert.equal(disposeCalls, 1);
+  await driver.dispose();
+  assert.equal(disposeCalls, 1);
 });

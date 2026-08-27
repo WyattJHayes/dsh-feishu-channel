@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rename, rm } from 'node:fs/promises';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -266,5 +266,27 @@ test('session map preserves a malformed versioned primary instead of silently dr
   assert.equal(state.recoveredPath, file + '.recovered');
   assert.equal(JSON.parse(readFileSync(file + '.recovered', 'utf8')).bindings.oc_1, undefined);
   assert.equal(JSON.parse(readFileSync(file + '.recovered', 'utf8')).bindings.oc_2.projectPath, '/tmp/other-project');
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('session map keeps its in-memory binding unchanged when persistence fails', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'feishu-state-'));
+  const stateDir = join(dir, 'state');
+  const file = join(stateDir, 'bindings.json');
+  const state = createSessionMap(file, { now: () => '2026-08-27T00:00:00.000Z' });
+  state.bind('oc_1', { projectPath: '/tmp/project-1' });
+
+  const displacedStateDir = join(dir, 'state-backup');
+  await rename(stateDir, displacedStateDir);
+  await mkdir(stateDir);
+  await rm(stateDir, { recursive: true });
+  writeFileSync(stateDir, 'not a directory', 'utf8');
+
+  assert.throws(() => state.bind('oc_2', { projectPath: '/tmp/project-2' }));
+  assert.deepEqual(state.get('oc_1'), {
+    projectPath: '/tmp/project-1',
+    updatedAt: '2026-08-27T00:00:00.000Z',
+  });
+  assert.equal(state.get('oc_2'), undefined);
   await rm(dir, { recursive: true, force: true });
 });

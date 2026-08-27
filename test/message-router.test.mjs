@@ -208,6 +208,36 @@ test('router keeps the project and clears the session for new conversations', as
   assert.deepEqual(options.driver.resetCalls, ['chat-1']);
 });
 
+test('router allows a project switch when no Agent session is bound', async () => {
+  const bindings = createMemoryBindings({
+    'chat-1': { projectPath: '/work/project-a' },
+  });
+  const options = makeRouterOptions({ bindings });
+  options.projectPolicy.resolve = (path) => ({ ok: true, path });
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({ eventId: 'e-project-switch', chatId: 'chat-1', openId: 'user-1', chatType: 'p2p', text: '/project /work/project-b' });
+
+  assert.deepEqual(bindings.get('chat-1'), { projectPath: '/work/project-b' });
+  assert.deepEqual(options.driver.resetCalls, []);
+});
+
+test('router resets a stale session before replacing an invalid project binding', async () => {
+  const bindings = createMemoryBindings({
+    'chat-1': { projectPath: '/work/project-a', sessionId: 'session-1' },
+  });
+  const options = makeRouterOptions({ bindings });
+  options.projectPolicy.resolve = (path) => path === '/work/project-a'
+    ? { ok: false, message: 'old project unavailable' }
+    : { ok: true, path };
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({ eventId: 'e-stale-project', chatId: 'chat-1', openId: 'user-1', chatType: 'p2p', text: '/project /work/project-b' });
+
+  assert.deepEqual(options.driver.resetCalls, ['chat-1']);
+  assert.deepEqual(bindings.get('chat-1'), { projectPath: '/work/project-b' });
+});
+
 test('router rejects overlong prompts before they reach the Agent', async () => {
   const options = makeRouterOptions({
     bindings: createMemoryBindings({ 'chat-1': { projectPath: '/work/project' } }),
@@ -219,6 +249,22 @@ test('router rejects overlong prompts before they reach the Agent', async () => 
 
   assert.equal(options.driver.promptCalls, 0);
   assert.match(lastText(options), /过长/);
+});
+
+test('router returns a bounded error when the prompt queue is full', async () => {
+  const options = makeRouterOptions({
+    bindings: createMemoryBindings({ 'chat-1': { projectPath: '/work/project' } }),
+    driver: {
+      enqueuePrompt() {
+        throw new Error('FEISHU_PROMPT_QUEUE_FULL: waiting capacity reached');
+      },
+    },
+  });
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({ eventId: 'e-full', chatId: 'chat-1', openId: 'user-1', chatType: 'p2p', text: 'run' });
+
+  assert.equal(lastText(options), '出错了：FEISHU_PROMPT_QUEUE_FULL');
 });
 
 test('router treats unknown slash commands as ordinary prompts after project binding', async () => {

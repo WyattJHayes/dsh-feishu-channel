@@ -23,3 +23,16 @@ test('prompt queue runs tasks FIFO and cancelPending skips queued tasks', async 
 
   assert.deepEqual(order, ['first']);
 });
+
+test('prompt queue rejects tasks above the configured capacity', async () => {
+  const queue = createPromptQueue({ maxQueued: 2 });
+  let release;
+  const first = queue.push(() => new Promise((resolve) => {
+    release = resolve;
+  }));
+  const second = queue.push(async () => {});
+
+  assert.throws(() => queue.push(async () => {}), /FEISHU_PROMPT_QUEUE_FULL/);
+  release();
+  await Promise.all([first.promise, second.promise]);
+});

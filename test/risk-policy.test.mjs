@@ -14,6 +14,34 @@ test('risk policy allows safe project reads but asks before running project scri
   }).kind, 'ask');
 });
 
+test('risk policy allows only scoped str_replace_editor operations', () => {
+  assert.deepEqual(classifyToolExecution({
+    name: 'str_replace_editor',
+    arguments: {
+      command: 'str_replace',
+      path: '/work/src/app.js',
+      old_str: 'before',
+      new_str: 'after',
+    },
+  }, {
+    projectPath: '/work',
+  }), { kind: 'allow' });
+
+  assert.equal(classifyToolExecution({
+    name: 'str_replace_editor',
+    arguments: { command: 'shell', path: '/work/src/app.js' },
+  }, {
+    projectPath: '/work',
+  }).kind, 'deny');
+
+  assert.equal(classifyToolExecution({
+    name: 'str_replace_editor',
+    arguments: { command: 'str_replace', path: '/outside/app.js' },
+  }, {
+    projectPath: '/work',
+  }).kind, 'deny');
+});
+
 test('risk policy inspects absolute paths assigned with command options', () => {
   assert.equal(classifyToolExecution({
     name: 'bash',
@@ -195,6 +223,18 @@ test('risk policy does not allow Git commands that mutate refs or write output',
   }, {
     projectPath: '/work',
   }).kind, 'ask');
+});
+
+test('risk policy requires approval for plain git diff because local Git config can execute helpers', () => {
+  const result = classifyToolExecution({
+    name: 'bash',
+    arguments: { command: 'git diff' },
+  }, {
+    projectPath: '/work',
+  });
+
+  assert.equal(result.kind, 'ask');
+  assert.equal(result.reason, 'RISK_POLICY_GIT_EXTERNAL_DIFF');
 });
 
 test('risk policy asks before all known Git mutation commands', () => {

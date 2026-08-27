@@ -55,8 +55,9 @@ test('access: normalizeList trims and splits', () => {
 
 test('commands: slash routing and unknown-slash fallback to prompt', () => {
   assert.deepEqual(parseCommand('/new'), { type: 'new' });
-  assert.deepEqual(parseCommand('/USE 2'), { type: 'use', index: 2 });
-  assert.deepEqual(parseCommand('/use'), { type: 'usage', command: 'use', hint: '/use <序号>，例如 /use 2' });
+  assert.deepEqual(parseCommand('/USE 2'), { type: 'prompt', text: '/USE 2' });
+  assert.deepEqual(parseCommand('/sessions'), { type: 'prompt', text: '/sessions' });
+  assert.deepEqual(parseCommand('/revoke token-1'), { type: 'prompt', text: '/revoke token-1' });
   assert.deepEqual(parseCommand('/help'), { type: 'help' });
   assert.deepEqual(parseCommand('/nope keep going'), { type: 'prompt', text: '/nope keep going' });
   assert.deepEqual(parseCommand('帮我列出目录'), { type: 'prompt', text: '帮我列出目录' });
@@ -82,6 +83,18 @@ test('chunking: short text untouched; long text splits at newlines when possible
   const long = `${'x'.repeat(3000)}\n${'y'.repeat(3000)}`;
   const chunks = chunkText(long, 3800);
   assert.equal(chunks.length, 2);
-  assert.equal(chunks[0].length, 3000);
+  assert.equal(chunks[0].length, 3001);
+  assert.equal(chunks.join(''), long);
   assert.ok(chunks.every((c) => c.length <= 3800));
+});
+
+test('chunking: preserves newlines and never splits a Unicode code point', () => {
+  const newlineText = 'xxx\nyyy';
+  const newlineChunks = chunkText(newlineText, 5);
+  const emojiChunks = chunkText('😀😀😀', 2);
+
+  assert.deepEqual(newlineChunks, ['xxx\n', 'yyy']);
+  assert.equal(newlineChunks.join(''), newlineText);
+  assert.deepEqual(emojiChunks, ['😀😀', '😀']);
+  assert.ok(emojiChunks.every((chunk) => Array.from(chunk).length <= 2));
 });

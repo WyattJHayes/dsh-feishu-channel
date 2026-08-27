@@ -181,6 +181,23 @@ test('progress relay suppresses pending sends after immediate close', async () =
   assert.deepEqual(sent, []);
 });
 
+test('progress relay ignores late events after close', async () => {
+  const sent = [];
+  const relay = createProgressRelay({
+    getChatId: () => 'chat-1',
+    sendText: async (_chatId, text) => sent.push(text),
+    minIntervalMs: 0,
+    maxMessages: 10,
+  });
+
+  relay.close();
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } });
+  await flushAsyncSends();
+
+  assert.equal(relay.getStatus('session-1'), undefined);
+  assert.deepEqual(sent, []);
+});
+
 test('progress relay does not let a cancelled send attach to a recreated session', async () => {
   const sent = [];
   const relay = createProgressRelay({

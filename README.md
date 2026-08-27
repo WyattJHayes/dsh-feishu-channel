@@ -39,7 +39,7 @@ dsh credentials set FEISHU_APP_SECRET <your-app-secret>
 
 私聊至少需要 `allowedOpenIds`。群聊同时需要发送者的 `open_id` 和群的 `chat_id`。项目路径必须是允许根目录内的已有目录，插件会按真实路径检查符号链接和路径边界；不会默认放行当前目录、用户目录或整个文件系统。
 
-可选配置包括 `stateFile`、`approvalTimeoutMs`、`progressIntervalMs`、`maxProgressMessages`、`maxPromptLength`、`dedupeCapacity`、`dedupeTtlMs`、`agentOperationTimeoutMs`、`whenIdleTimeoutMs` 和 `cancelTimeoutMs`。超时配置会被限制在有限范围内，`stateFile` 只能落在 `$DSH_HOME/cache` 内。
+可选配置包括 `stateFile`、`approvalTimeoutMs`、`progressIntervalMs`、`maxProgressMessages`、`maxPromptLength`、`maxQueuedPrompts`、`dedupeCapacity`、`dedupeTtlMs`、`agentOperationTimeoutMs`、`whenIdleTimeoutMs` 和 `cancelTimeoutMs`。数值配置有保守上限，`maxQueuedPrompts` 默认是 8，`stateFile` 只能落在 `$DSH_HOME/cache` 内。
 
 ## 使用
 
