@@ -90,7 +90,14 @@ test('agent: includes cwd in creation metadata', async () => {
 test('agent: setup callback does not return the model selection disposer', async () => {
   const { createAgentSetup } = await import('../lib/index.js');
   const agentCtx = {
-    agent: { session: { events: [], append() {} } },
+    agent: {
+      session: {
+        events: [],
+        append(type, data) {
+          this.events.push({ type, data });
+        },
+      },
+    },
     on: () => () => {},
   };
   const agentPresets = { mount: async () => {} };
@@ -453,6 +460,41 @@ test('sender serializes concurrent messages and releases the queue after complet
   releaseFirst({ code: 0 });
   await Promise.all([first, second]);
   assert.deepEqual(calls, [1, 2]);
+});
+
+test('sender captures the resolved recipient when a message enters the queue', async () => {
+  const { createFeishuSender } = await import('../lib/index.js');
+  const requests = [];
+  let releaseFirst;
+  const firstRequest = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  let recipient = { receiveId: 'user-a', receiveIdType: 'open_id' };
+  const sender = createFeishuSender({
+    resolveCredential: async () => 'test-credential',
+    resolveRecipient: () => recipient,
+    clientFactory: () => ({
+      im: {
+        message: {
+          create: async (request) => {
+            requests.push(request);
+            if (requests.length === 1) return firstRequest;
+            return { code: 0 };
+          },
+        },
+      },
+    }),
+    timeoutMs: 1000,
+  });
+
+  const first = sender('chat-1', 'first');
+  recipient = { receiveId: 'user-b', receiveIdType: 'open_id' };
+  const second = sender('chat-1', 'second');
+  releaseFirst({ code: 0 });
+  await Promise.all([first, second]);
+
+  assert.equal(requests[0].data.receive_id, 'user-a');
+  assert.equal(requests[1].data.receive_id, 'user-b');
 });
 
 test('sender bounds the number of active and queued outbound messages', async () => {

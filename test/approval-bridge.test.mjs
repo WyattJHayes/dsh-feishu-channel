@@ -45,6 +45,51 @@ test('approval bridge issues a token and consumes it once in the same chat', asy
   bridge.close();
 });
 
+test('approval bridge only accepts the recipient that received the request', async () => {
+  const requests = [];
+  const first = { receiveId: 'user-a', receiveIdType: 'open_id' };
+  const second = { receiveId: 'user-b', receiveIdType: 'open_id' };
+  const bridge = createApprovalBridge({
+    timeoutMs: 1000,
+    tokenFactory: () => 'ap-recipient',
+    sendApproval: async (chatId, message, recipient) => requests.push({ chatId, message, recipient }),
+  });
+  const exec = { agent: { id: 'session-1' }, callId: 'call-1' };
+  bridge.remember(exec, { toolName: 'bash', riskCategory: 'git-publish', projectRelativePath: '.' });
+  const decision = bridge.createListener(() => 'chat-1', () => first)(exec, async () => 'next');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(requests[0].recipient, first);
+  assert.equal((await bridge.answer('chat-1', 'ap-recipient', 'allowed-once', second)).ok, false);
+  assert.equal((await bridge.answer('chat-1', 'ap-recipient', 'allowed-once', first)).ok, true);
+  assert.equal(await decision, 'allowed-once');
+  bridge.close();
+});
+
+test('approval bridge binds an approval token to its captured recipient', async () => {
+  const requests = [];
+  const bridge = createApprovalBridge({
+    timeoutMs: 1000,
+    tokenFactory: () => 'ap-recipient',
+    sendApproval: async (chatId, message, recipient) => requests.push({ chatId, message, recipient }),
+  });
+  const recipientA = { receiveId: 'user-a', receiveIdType: 'open_id' };
+  const recipientB = { receiveId: 'user-b', receiveIdType: 'open_id' };
+  const exec = { agent: { id: 'session-1' }, callId: 'call-1' };
+  bridge.remember(exec, { toolName: 'bash', riskCategory: 'git-publish', projectRelativePath: '.' });
+  const decision = bridge.createListener(
+    () => 'chat-1',
+    () => recipientA,
+  )(exec, async () => 'next');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(requests[0].recipient, recipientA);
+  assert.equal((await bridge.answer('chat-1', 'ap-recipient', 'allowed-once', recipientB)).ok, false);
+  assert.equal((await bridge.answer('chat-1', 'ap-recipient', 'allowed-once', recipientA)).ok, true);
+  assert.equal(await decision, 'allowed-once');
+  bridge.close();
+});
+
 test('approval bridge rejects invalid outcomes without consuming the token', async () => {
   const bridge = createApprovalBridge({
     timeoutMs: 1000,

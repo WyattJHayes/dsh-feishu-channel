@@ -365,3 +365,49 @@ test('progress relay accepts an injected scheduler for bounded rate limiting', a
   assert.deepEqual(sent, ['Agent turn started.', 'Agent turn ended.']);
   relay.close();
 });
+
+test('progress relay freezes the recipient for each Agent turn', async () => {
+  const sent = [];
+  const relay = createProgressRelay({
+    sendText: async (chatId, text, recipient) => sent.push({ chatId, text, recipient }),
+    minIntervalMs: 0,
+    maxMessages: 10,
+  });
+  const first = { receiveId: 'user-a', receiveIdType: 'open_id' };
+  const second = { receiveId: 'user-b', receiveIdType: 'open_id' };
+
+  relay.setRecipient('session-1', 'chat-1', first);
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } });
+  relay.setRecipient('session-1', 'chat-1', second);
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'tool/call', data: { turn: 1, name: 'bash' } });
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 2 } });
+  await flushAsyncSends();
+
+  assert.deepEqual(sent.map(({ text, recipient }) => ({ text, recipient })), [
+    { text: 'Agent turn started.', recipient: first },
+    { text: 'Calling tool: bash.', recipient: first },
+    { text: 'Agent turn started.', recipient: second },
+  ]);
+  relay.close();
+});
+
+test('progress relay keeps the recipient captured for the active turn', async () => {
+  const sent = [];
+  const relay = createProgressRelay({
+    sendText: async (chatId, text, recipient) => sent.push({ chatId, text, recipient }),
+    minIntervalMs: 0,
+    maxMessages: 10,
+  });
+  const firstRecipient = { receiveId: 'user-a', receiveIdType: 'open_id' };
+  const secondRecipient = { receiveId: 'user-b', receiveIdType: 'open_id' };
+  const session = { id: 'session-1' };
+
+  relay.setRecipient('session-1', 'chat-1', firstRecipient);
+  relay.onSessionEvent(session, { type: 'turn/start', data: { turn: 1 } });
+  relay.setRecipient('session-1', 'chat-1', secondRecipient);
+  relay.onSessionEvent(session, { type: 'turn/end', data: { turn: 1 } });
+  await flushAsyncSends();
+
+  assert.deepEqual(sent.map(({ recipient }) => recipient), [firstRecipient, firstRecipient]);
+  relay.close();
+});

@@ -24,6 +24,7 @@ function createAgentContext(agent) {
         createCalls.push(options);
         agent.id = options.sessionId;
         agent.session.id = options.sessionId;
+        agent.session.events.push({ type: 'approval/policy', data: { policy: 'ask' } });
         liveAgents.set(options.sessionId, agent);
         return { agent };
       },
@@ -121,6 +122,7 @@ test('integration routes project-bound prompts through the Agent driver FIFO and
     bindings,
     config: {},
     approvalBridge,
+    progressRelay,
   });
   const router = createMessageRouter({
     config: {

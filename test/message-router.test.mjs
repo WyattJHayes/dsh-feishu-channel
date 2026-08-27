@@ -196,10 +196,11 @@ test('router silently drops unauthorized events without consuming outbound sends
   assert.equal(options.driver.promptCalls, 0);
 });
 
-test('router registers the authorized sender as the group output target', async () => {
-  const targets = [];
-  const options = makeRouterOptions();
-  options.setOutputTarget = (chatId, target) => targets.push({ chatId, target });
+test('router sends group control responses to the authorized sender', async () => {
+  const sent = [];
+  const options = makeRouterOptions({
+    sendText: async (chatId, text, recipient) => sent.push({ chatId, text, recipient }),
+  });
   const router = createMessageRouter(options);
 
   await router.handleMessage({
@@ -210,7 +211,60 @@ test('router registers the authorized sender as the group output target', async 
     text: '/status',
   });
 
-  assert.deepEqual(targets, [{ chatId: 'chat-1', target: { chatType: 'group', openId: 'user-1' } }]);
+  assert.deepEqual(sent[0].recipient, { receiveId: 'user-1', receiveIdType: 'open_id' });
+});
+
+test('router passes each group sender to its own control response', async () => {
+  const sent = [];
+  const options = makeRouterOptions({
+    config: { allowedOpenIds: ['user-a', 'user-b'] },
+    sendText: async (chatId, text, recipient) => sent.push({ chatId, text, recipient }),
+  });
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({ eventId: 'e-a', chatId: 'chat-1', openId: 'user-a', chatType: 'group', text: '/status' });
+  await router.handleMessage({ eventId: 'e-b', chatId: 'chat-1', openId: 'user-b', chatType: 'group', text: '/status' });
+
+  assert.deepEqual(sent.map(({ recipient }) => recipient), [
+    { receiveId: 'user-a', receiveIdType: 'open_id' },
+    { receiveId: 'user-b', receiveIdType: 'open_id' },
+  ]);
+});
+
+test('router keeps queued group prompt results with their originating senders', async () => {
+  const sent = [];
+  const runs = new Map();
+  const options = makeRouterOptions({
+    config: { allowedOpenIds: ['user-a', 'user-b'] },
+    sendText: async (chatId, text, recipient) => sent.push({ chatId, text, recipient }),
+    bindings: createMemoryBindings({ 'chat-1': { projectPath: '/work/project' } }),
+    driver: {
+      enqueuePrompt(_chatId, text, recipient) {
+        const deferred = createDeferred();
+        runs.set(text, { deferred, recipient });
+        return { position: 1, promise: deferred.promise };
+      },
+    },
+  });
+  const router = createMessageRouter(options);
+
+  await Promise.all([
+    router.handleMessage({ eventId: 'e-a', chatId: 'chat-1', openId: 'user-a', chatType: 'group', text: 'run-a' }),
+    router.handleMessage({ eventId: 'e-b', chatId: 'chat-1', openId: 'user-b', chatType: 'group', text: 'run-b' }),
+  ]);
+  runs.get('run-a').deferred.resolve({ kind: 'text', text: 'result-a' });
+  runs.get('run-b').deferred.resolve({ kind: 'text', text: 'result-b' });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(runs.get('run-a').recipient, { receiveId: 'user-a', receiveIdType: 'open_id' });
+  assert.deepEqual(runs.get('run-b').recipient, { receiveId: 'user-b', receiveIdType: 'open_id' });
+  assert.deepEqual(
+    sent.filter(({ text }) => text.startsWith('result-')).map(({ text, recipient }) => ({ text, recipient })),
+    [
+      { text: 'result-a', recipient: { receiveId: 'user-a', receiveIdType: 'open_id' } },
+      { text: 'result-b', recipient: { receiveId: 'user-b', receiveIdType: 'open_id' } },
+    ],
+  );
 });
 
 test('router refuses project rebinding across projects until new clears the session', async () => {

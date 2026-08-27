@@ -272,7 +272,9 @@ test('driver setup mounts the Agent preset before registering scoped listeners',
     agent: {
       session: {
         events: [],
-        append() {},
+        append(type, data) {
+          this.events.push({ type, data });
+        },
       },
     },
     on(name, listener) {
@@ -339,6 +341,7 @@ test('driver runs prompts FIFO and returns the result for each turn', async () =
       order.push(`end:${text}`);
     },
   });
+  agent.session.append('approval/policy', { policy: 'ask' });
   const ctx = fakeAgentContext({ get: () => agent });
   const driver = createAgentDriver(ctx, {
     bindings: createMemoryBindings({ projectPath: '/work/project' }),
@@ -358,6 +361,57 @@ test('driver runs prompts FIFO and returns the result for each turn', async () =
   assert.deepEqual(order, ['start:first', 'end:first', 'start:second', 'end:second']);
 });
 
+test('driver rejects a live session without the latest ask approval policy', async () => {
+  const agent = fakeAgent('session-1');
+  const ctx = fakeAgentContext({
+    get: () => agent,
+    create: async () => ({ agent }),
+  });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: {},
+  });
+
+  await driver.ensureSession('chat-1');
+  await assert.rejects(
+    () => driver.ensureSession('chat-1'),
+    /FEISHU_REMOTE_PERMISSION_FAILED: live Agent permission is not workspace-write with approval/,
+  );
+  agent.session.append('approval/policy', { policy: 'ask' });
+  assert.equal(await driver.ensureSession('chat-1'), 'session-1');
+  agent.session.append('approval/policy', { policy: 'never' });
+  await assert.rejects(
+    () => driver.ensureSession('chat-1'),
+    /FEISHU_REMOTE_PERMISSION_FAILED: live Agent permission is not workspace-write with approval/,
+  );
+  await driver.dispose();
+});
+
+test('driver clears the session recipient after a normal prompt completes', async () => {
+  const agent = fakeAgent('session-1');
+  agent.session.append('approval/policy', { policy: 'ask' });
+  const ctx = fakeAgentContext();
+  ctx.agents.get = () => agent;
+  ctx.agents.create = async () => ({ agent });
+  const calls = [];
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    progressRelay: {
+      setRecipient: (...args) => calls.push(['set', ...args]),
+      clearRecipient: (...args) => calls.push(['clear', ...args]),
+    },
+  });
+  const recipient = { receiveId: 'user-1', receiveIdType: 'open_id' };
+
+  await driver.enqueuePrompt('chat-1', 'run', recipient);
+
+  assert.deepEqual(calls, [
+    ['set', 'session-1', 'chat-1', recipient],
+    ['clear', 'session-1'],
+  ]);
+  await driver.dispose();
+});
+
 test('driver rejects a live session that was not created or resumed by Feishu', async () => {
   const agent = fakeAgent('session-1');
   const driver = createAgentDriver(fakeAgentContext({ get: () => agent }), {
@@ -369,6 +423,26 @@ test('driver rejects a live session that was not created or resumed by Feishu', 
     () => driver.ensureSession('chat-1'),
     /FEISHU_AGENT_UNAVAILABLE: live Agent is not managed by Feishu; use \/new/,
   );
+});
+
+test('driver rejects a managed live session whose latest approval policy is not ask', async () => {
+  const agent = fakeAgent('session-1');
+  const ctx = fakeAgentContext();
+  ctx.agents.get = () => agent;
+  ctx.agents.create = async () => ({ agent });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: {},
+  });
+
+  await driver.ensureSession('chat-1');
+  agent.session.append('approval/policy', { policy: 'never' });
+
+  await assert.rejects(
+    () => driver.ensureSession('chat-1'),
+    /FEISHU_REMOTE_PERMISSION_FAILED: live Agent permission is not workspace-write with approval/,
+  );
+  await driver.dispose();
 });
 
 test('driver cancel aborts active Agent and clears pending approvals', async () => {
