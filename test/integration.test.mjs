@@ -24,6 +24,7 @@ function createAgentContext(agent) {
         createCalls.push(options);
         agent.id = options.sessionId;
         agent.session.id = options.sessionId;
+        agent.session.header.cwd = options.meta.cwd;
         agent.session.events.push({ type: 'approval/policy', data: { policy: 'ask' } });
         liveAgents.set(options.sessionId, agent);
         return { agent };
@@ -61,7 +62,7 @@ function createAgent() {
   };
   const agent = {
     id: 'uncreated',
-    session: { id: 'uncreated', events: [] },
+    session: { id: 'uncreated', header: { cwd: 'uncreated' }, events: [] },
     ctx: eventContext,
     cancel() {},
     async whenIdle() {},

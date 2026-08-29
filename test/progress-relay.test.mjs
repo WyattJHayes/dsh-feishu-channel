@@ -335,6 +335,45 @@ test('progress relay ignores tracked events for sessions without a chat binding'
   relay.close();
 });
 
+test('progress relay expires idle status entries after the configured TTL', () => {
+  let currentTime = 0;
+  const relay = createProgressRelay({
+    getChatId: () => 'chat-1',
+    sendText: async () => {},
+    minIntervalMs: 0,
+    maxMessages: 10,
+    statusTtlMs: 10,
+    now: () => currentTime,
+  });
+
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } });
+  assert.equal(relay.getStatus('session-1').phase, 'running');
+  currentTime = 10;
+
+  assert.equal(relay.getStatus('session-1'), undefined);
+  relay.close();
+});
+
+test('progress relay evicts the least recently used status at session capacity', () => {
+  const relay = createProgressRelay({
+    getChatId: () => 'chat-1',
+    sendText: async () => {},
+    minIntervalMs: 0,
+    maxMessages: 10,
+    maxSessions: 2,
+  });
+
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } });
+  relay.onSessionEvent({ id: 'session-2' }, { type: 'turn/start', data: { turn: 1 } });
+  relay.getStatus('session-1');
+  relay.onSessionEvent({ id: 'session-3' }, { type: 'turn/start', data: { turn: 1 } });
+
+  assert.equal(relay.getStatus('session-1').phase, 'running');
+  assert.equal(relay.getStatus('session-2'), undefined);
+  assert.equal(relay.getStatus('session-3').phase, 'running');
+  relay.close();
+});
+
 test('progress relay accepts an injected scheduler for bounded rate limiting', async () => {
   const sent = [];
   const timers = [];
@@ -409,5 +448,47 @@ test('progress relay keeps the recipient captured for the active turn', async ()
   await flushAsyncSends();
 
   assert.deepEqual(sent.map(({ recipient }) => recipient), [firstRecipient, firstRecipient]);
+  relay.close();
+});
+
+test('progress relay drops frozen turn recipients when a session recipient is cleared', async () => {
+  const sent = [];
+  const relay = createProgressRelay({
+    sendText: async (chatId, text, recipient) => sent.push({ chatId, text, recipient }),
+    minIntervalMs: 0,
+    maxMessages: 10,
+  });
+  const recipient = { receiveId: 'user-a', receiveIdType: 'open_id' };
+
+  relay.setRecipient('session-1', 'chat-1', recipient);
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } });
+  relay.clearRecipient('session-1');
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/end', data: { turn: 1 } });
+  await flushAsyncSends();
+
+  assert.deepEqual(sent.map(({ text }) => text), ['Agent turn started.']);
+  relay.close();
+});
+
+test('progress relay drops frozen turn recipients when the recipient LRU evicts a session', async () => {
+  const sent = [];
+  const relay = createProgressRelay({
+    sendText: async (chatId, text, recipient) => sent.push({ chatId, text, recipient }),
+    minIntervalMs: 0,
+    maxMessages: 10,
+    maxSessions: 1,
+  });
+  const first = { receiveId: 'user-a', receiveIdType: 'open_id' };
+  const second = { receiveId: 'user-b', receiveIdType: 'open_id' };
+
+  relay.setRecipient('session-1', 'chat-1', first);
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'turn/start', data: { turn: 1 } });
+  relay.setRecipient('session-2', 'chat-2', second);
+  relay.onSessionEvent({ id: 'session-1' }, { type: 'tool/call', data: { turn: 1, name: 'bash' } });
+  await flushAsyncSends();
+
+  assert.deepEqual(sent.map(({ chatId, text, recipient }) => ({ chatId, text, recipient })), [
+    { chatId: 'chat-1', text: 'Agent turn started.', recipient: first },
+  ]);
   relay.close();
 });

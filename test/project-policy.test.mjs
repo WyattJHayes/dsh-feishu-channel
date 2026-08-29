@@ -44,3 +44,28 @@ test('project policy rejects a symlink whose real target leaves the allowed root
   await rm(root, { recursive: true, force: true });
   await rm(outside, { recursive: true, force: true });
 });
+
+test('project policy rejects Git metadata directories as project roots', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'feishu-root-'));
+  const repo = join(root, 'repo');
+  const gitRoot = join(repo, '.git');
+  await mkdir(join(gitRoot, 'hooks'), { recursive: true });
+  const policy = createProjectPolicy([root]);
+
+  assert.deepEqual(policy.resolve(gitRoot), {
+    ok: false,
+    code: 'PROJECT_PATH_GIT_METADATA',
+    message: '项目路径不能是 Git 元数据目录。',
+  });
+  assert.deepEqual(policy.resolve(join(gitRoot, 'hooks')), {
+    ok: false,
+    code: 'PROJECT_PATH_GIT_METADATA',
+    message: '项目路径不能是 Git 元数据目录。',
+  });
+
+  await assert.rejects(
+    async () => createProjectPolicy([gitRoot]),
+    /FEISHU_ALLOWED_ROOT_GIT_METADATA/,
+  );
+  await rm(root, { recursive: true, force: true });
+});

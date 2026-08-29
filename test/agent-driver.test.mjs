@@ -1,9 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
+import { mkdir, mkdtemp, rename, rm, symlink } from 'node:fs/promises';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 import { createAgentDriver, createAgentSetup } from '../lib/agent-driver.js';
+import { createApprovalBridge } from '../lib/approval-bridge.js';
+import { createProjectPolicy } from '../lib/project-policy.js';
 
 const execFile = promisify(execFileCallback);
 
@@ -51,6 +55,7 @@ function fakeAgent(id, overrides = {}) {
     id,
     session: {
       id,
+      header: { cwd: '/work/project' },
       events: [],
       append(type, data) {
         this.events.push({ type, data });
@@ -191,6 +196,62 @@ test('driver resumes persisted session and does not silently create a replacemen
   assert.equal(bindings.get('chat-1').sessionId, 'session-1');
 });
 
+test('driver refuses a resumed Agent whose session cwd differs from the binding', async () => {
+  let disposeCalls = 0;
+  const agent = fakeAgent('session-1');
+  agent.session.header.cwd = '/outside/project';
+  const bindings = createMemoryBindings({
+    projectPath: '/work/project',
+    sessionId: 'session-1',
+  });
+  const driver = createAgentDriver(fakeAgentContext({
+    get: () => undefined,
+    resume: async () => ({
+      agent,
+      dispose() {
+        disposeCalls += 1;
+      },
+    }),
+  }), { bindings, config: {} });
+
+  await assert.rejects(() => driver.ensureSession('chat-1'), /FEISHU_AGENT_CWD_MISMATCH/);
+  assert.equal(disposeCalls, 1);
+  assert.equal(bindings.get('chat-1').sessionId, 'session-1');
+});
+
+test('driver rejects a created Agent when the project path is replaced outside the allowed root', async () => {
+  const root = await mkdtemp(join(process.env.TMPDIR ?? '/tmp', 'feishu-driver-root-'));
+  const outside = await mkdtemp(join(process.env.TMPDIR ?? '/tmp', 'feishu-driver-outside-'));
+  const project = join(root, 'project');
+  const movedProject = join(root, 'project-original');
+  await mkdir(project);
+  const projectPolicy = createProjectPolicy([root]);
+  const agent = fakeAgent('session-1');
+  const ctx = fakeAgentContext({
+    create: async () => {
+      await rename(project, movedProject);
+      await symlink(outside, project, 'dir');
+      agent.session.header.cwd = project;
+      return { agent };
+    },
+  });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: project }),
+    projectPolicy,
+    config: {},
+  });
+
+  try {
+    await assert.rejects(() => driver.ensureSession('chat-1'), /FEISHU_AGENT_CWD_MISMATCH/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rename(movedProject, project);
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+    await driver.dispose();
+  }
+});
+
 test('driver preserves the binding when resume fails', async () => {
   const bindings = createMemoryBindings({
     projectPath: '/work/project',
@@ -312,6 +373,121 @@ test('driver setup mounts the Agent preset before registering scoped listeners',
     'agent/request',
     'tools/pre-execute',
     'approval/request',
+  ]);
+});
+
+test('agent setup rejects approval requests from an inactive Feishu run', async () => {
+  const listeners = new Map();
+  const requests = [];
+  const recipient = { receiveId: 'user-1', receiveIdType: 'open_id' };
+  const session = {
+    events: [],
+    append(type, data) {
+      this.events.push({ type, data });
+    },
+  };
+  let active = true;
+  const agentCtx = {
+    agent: { id: 'session-1', session },
+    on(name, listener) {
+      listeners.set(name, listener);
+      return () => listeners.delete(name);
+    },
+  };
+  const bridge = createApprovalBridge({
+    timeoutMs: 1000,
+    tokenFactory: () => 'ap-inactive-run',
+    sendApproval: async (...args) => requests.push(args),
+  });
+
+  try {
+    await createAgentSetup(agentCtx, {
+      chatId: 'chat-1',
+      recipient,
+      projectPath: '/work/project',
+      isActive: () => active,
+      agentPresets: { mount: async () => {} },
+      permissionPresets: remotePermissionPresets(),
+      approvalBridge: bridge,
+    });
+
+    const exec = {
+      agent: { id: 'session-1' },
+      callId: 'call-1',
+      name: 'bash',
+      arguments: { command: 'git push' },
+    };
+    assert.equal((await listeners.get('tools/pre-execute')(exec, async () => 'next')).kind, 'ask');
+    active = false;
+
+    const result = await Promise.race([
+      listeners.get('approval/request')(exec, async () => 'desktop-answerer'),
+      new Promise((resolve) => setTimeout(() => resolve('timed-out'), 25)),
+    ]);
+    assert.equal(result, 'unavailable');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(requests, []);
+  } finally {
+    bridge.close();
+  }
+});
+
+test('driver accepts a pre-pinned safe permission state when apply skips unchanged approval', async () => {
+  const session = {
+    events: [
+      { type: 'permission/preset', data: { preset: 'workspace-write' } },
+      { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
+      { type: 'approval/policy', data: { policy: 'ask' } },
+    ],
+    append(type, data) {
+      this.events.push({ type, data });
+    },
+  };
+  const permissionPresets = {
+    apply(currentSession, preset, setApproval) {
+      if (currentSession.events.at(-1)?.data?.policy !== 'ask') setApproval('ask');
+      assert.equal(preset, 'workspace-write');
+    },
+    current(events) {
+      return [...events].reverse().find((event) => event.type === 'permission/preset')?.data?.preset;
+    },
+  };
+
+  await assert.doesNotReject(() => createAgentSetup({
+    agent: { session },
+    on() { return () => {}; },
+  }, {
+    selection: { current: { provider: 'deepseek', model: 'default-model' } },
+    agentPresets: { mount: async () => {} },
+    permissionPresets,
+  }));
+});
+
+test('driver records ask approval when a fresh session starts with safe defaults', async () => {
+  const session = {
+    events: [],
+    append(type, data) {
+      this.events.push({ type, data });
+    },
+  };
+  const permissionPresets = {
+    apply() {},
+    current() {
+      return 'workspace-write';
+    },
+  };
+
+  await createAgentSetup({
+    agent: { session },
+    on() { return () => {}; },
+  }, {
+    selection: { current: { provider: 'deepseek', model: 'default-model' } },
+    agentPresets: { mount: async () => {} },
+    permissionPresets,
+  });
+
+  assert.deepEqual(session.events, [
+    { type: 'approval/policy', data: { policy: 'ask' } },
   ]);
 });
 
@@ -468,7 +644,7 @@ test('driver cancel aborts active Agent and clears pending approvals', async () 
   assert.deepEqual(await cancel, { cancelled: true });
   assert.deepEqual(await prompt, { kind: 'cancelled' });
 
-  assert.deepEqual(calls.find((call) => Array.isArray(call)), [{ kind: 'user' }, { keepInbox: true }]);
+  assert.deepEqual(calls.find((call) => Array.isArray(call)), [{ kind: 'user' }, { keepInbox: false }]);
   assert.equal(calls.filter((call) => call === 'session-1').length, 2);
 });
 
@@ -502,6 +678,236 @@ test('driver cancel skips queued prompts without invoking the Agent', async () =
   assert.deepEqual(await second, { kind: 'cancelled' });
   assert.deepEqual(await first, { kind: 'cancelled' });
   assert.deepEqual(followups, ['first']);
+});
+
+test('driver cancel completes when Agent idle never settles', async () => {
+  let releaseFollowup;
+  const agent = fakeAgent('session-1', {
+    followup: async () => new Promise((resolve) => {
+      releaseFollowup = resolve;
+    }),
+    whenIdle: () => new Promise(() => {}),
+  });
+  agent.session.append('approval/policy', { policy: 'ask' });
+  const ctx = fakeAgentContext({ get: () => agent });
+  ctx.agents.create = async () => ({ agent });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: { cancelTimeoutMs: 20, whenIdleTimeoutMs: 1000 },
+  });
+
+  const prompt = driver.enqueuePrompt('chat-1', 'run');
+  await new Promise((resolve) => setImmediate(resolve));
+  const cancel = driver.cancel('chat-1');
+  releaseFollowup();
+
+  assert.deepEqual(await cancel, { cancelled: true });
+  assert.deepEqual(await prompt, { kind: 'cancelled' });
+  await driver.dispose();
+});
+
+test('driver does not report cancellation until the active followup settles', async () => {
+  let releaseFollowup;
+  const agent = fakeAgent('session-1', {
+    followup: async () => new Promise((resolve) => {
+      releaseFollowup = resolve;
+    }),
+  });
+  const ctx = fakeAgentContext({ get: () => agent });
+  ctx.agents.create = async () => ({ agent });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: { cancelTimeoutMs: 20 },
+  });
+
+  const prompt = driver.enqueuePrompt('chat-1', 'run');
+  await new Promise((resolve) => setImmediate(resolve));
+  const cancellation = driver.cancel('chat-1');
+  const early = await Promise.race([
+    cancellation.then(() => 'settled'),
+    new Promise((resolve) => setTimeout(() => resolve('pending'), 5)),
+  ]);
+  assert.equal(early, 'pending');
+
+  releaseFollowup();
+  assert.deepEqual(await cancellation, { cancelled: true });
+  assert.deepEqual(await prompt, { kind: 'cancelled' });
+  await driver.dispose();
+});
+
+test('driver taints a session when a cancelled followup rejects before idle is confirmed', async () => {
+  let rejectFollowup;
+  let followupCount = 0;
+  let whenIdleCalls = 0;
+  const agent = fakeAgent('session-1', {
+    followup: async () => {
+      followupCount += 1;
+      if (followupCount === 1) {
+        await new Promise((_resolve, reject) => {
+          rejectFollowup = reject;
+        });
+      }
+    },
+    whenIdle: () => {
+      whenIdleCalls += 1;
+      return Promise.reject(new Error('Agent idle unavailable'));
+    },
+  });
+  agent.session.append('approval/policy', { policy: 'ask' });
+  const ctx = fakeAgentContext({ get: () => agent });
+  ctx.agents.create = async () => ({ agent });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: { cancelTimeoutMs: 20 },
+  });
+
+  const first = driver.enqueuePrompt('chat-1', 'first');
+  await new Promise((resolve) => setImmediate(resolve));
+  const cancellation = driver.cancel('chat-1');
+  rejectFollowup(new Error('followup stopped after cancellation'));
+
+  assert.deepEqual(await cancellation, { cancelled: true });
+  assert.deepEqual(await first, { kind: 'cancelled' });
+  assert.equal(whenIdleCalls, 1);
+  await assert.rejects(
+    () => driver.enqueuePrompt('chat-1', 'second'),
+    /FEISHU_AGENT_UNAVAILABLE: the bound Agent requires \/new before reuse/,
+  );
+  assert.equal(followupCount, 1);
+  await driver.dispose();
+});
+
+test('driver taints a session when a cancelled followup times out before idle is confirmed', async () => {
+  let followupCount = 0;
+  let whenIdleCalls = 0;
+  const agent = fakeAgent('session-1', {
+    followup: async () => {
+      followupCount += 1;
+      return new Promise(() => {});
+    },
+    whenIdle: () => {
+      whenIdleCalls += 1;
+      return Promise.reject(new Error('Agent idle unavailable'));
+    },
+  });
+  agent.session.append('approval/policy', { policy: 'ask' });
+  const ctx = fakeAgentContext({ get: () => agent });
+  ctx.agents.create = async () => ({ agent });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: { agentOperationTimeoutMs: 20, cancelTimeoutMs: 20 },
+  });
+
+  const first = driver.enqueuePrompt('chat-1', 'first');
+  await new Promise((resolve) => setImmediate(resolve));
+  const cancellation = driver.cancel('chat-1');
+
+  assert.deepEqual(await cancellation, { cancelled: true });
+  assert.deepEqual(await first, { kind: 'cancelled' });
+  assert.equal(whenIdleCalls, 1);
+  await assert.rejects(
+    () => driver.enqueuePrompt('chat-1', 'second'),
+    /FEISHU_AGENT_UNAVAILABLE: the bound Agent requires \/new before reuse/,
+  );
+  assert.equal(followupCount, 1);
+  await driver.dispose();
+});
+
+test('driver taints a session when cancellation cannot confirm Agent idle', async () => {
+  let releaseFollowup;
+  const followups = [];
+  const agent = fakeAgent('session-1', {
+    followup: async (message) => {
+      followups.push(message.content[0].text);
+      if (followups.length === 1) {
+        await new Promise((resolve) => {
+          releaseFollowup = resolve;
+        });
+      }
+    },
+    whenIdle: () => new Promise((resolve) => setTimeout(resolve, 50)),
+  });
+  agent.session.append('approval/policy', { policy: 'ask' });
+  const ctx = fakeAgentContext({ get: () => agent });
+  ctx.agents.create = async () => ({ agent });
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: { cancelTimeoutMs: 20 },
+  });
+
+  const first = driver.enqueuePrompt('chat-1', 'first');
+  await new Promise((resolve) => setImmediate(resolve));
+  const cancellation = driver.cancel('chat-1');
+  releaseFollowup();
+
+  assert.deepEqual(await cancellation, { cancelled: true });
+  assert.deepEqual(await first, { kind: 'cancelled' });
+  await assert.rejects(
+    () => driver.enqueuePrompt('chat-1', 'second'),
+    /FEISHU_AGENT_UNAVAILABLE: the bound Agent requires \/new before reuse/,
+  );
+  assert.deepEqual(followups, ['first']);
+  await driver.dispose();
+});
+
+test('driver reports cancellation timeout and keeps the session bound for a failed reset', async () => {
+  let releaseFollowup;
+  const agent = fakeAgent('session-1', {
+    followup: async () => new Promise((resolve) => {
+      releaseFollowup = resolve;
+    }),
+  });
+  const ctx = fakeAgentContext({ get: () => agent });
+  ctx.agents.create = async () => ({ agent, dispose() {} });
+  const bindings = createMemoryBindings({ projectPath: '/work/project' });
+  const driver = createAgentDriver(ctx, {
+    bindings,
+    config: { cancelTimeoutMs: 20 },
+  });
+
+  const prompt = driver.enqueuePrompt('chat-1', 'run');
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(() => driver.reset('chat-1'), /FEISHU_CANCEL_TIMEOUT/);
+  assert.deepEqual(bindings.get('chat-1'), {
+    projectPath: '/work/project',
+    sessionId: 'session-1',
+    model: { provider: 'deepseek', model: 'default-model' },
+  });
+
+  releaseFollowup();
+  assert.deepEqual(await prompt, { kind: 'cancelled' });
+  await assert.rejects(
+    () => driver.ensureSession('chat-1'),
+    /FEISHU_AGENT_UNAVAILABLE: the bound Agent requires \/new before reuse/,
+  );
+  await driver.dispose();
+});
+
+test('driver reports a cancellation failure when Agent.cancel rejects', async () => {
+  let releaseFollowup;
+  const agent = fakeAgent('session-1', {
+    followup: async () => new Promise((resolve) => {
+      releaseFollowup = resolve;
+    }),
+    cancel: async () => {
+      throw new Error('cancel backend failure');
+    },
+  });
+  const ctx = fakeAgentContext({ get: () => agent });
+  ctx.agents.create = async () => ({ agent, dispose() {} });
+  const bindings = createMemoryBindings({ projectPath: '/work/project' });
+  const driver = createAgentDriver(ctx, {
+    bindings,
+    config: { cancelTimeoutMs: 20 },
+  });
+
+  const prompt = driver.enqueuePrompt('chat-1', 'run');
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(() => driver.cancel('chat-1'), /FEISHU_CANCEL_FAILED/);
+
+  releaseFollowup();
+  assert.deepEqual(await prompt, { kind: 'cancelled' });
+  await driver.dispose();
 });
 
 test('driver cancel during create cancels the new Agent before followup', async () => {
@@ -551,7 +957,7 @@ test('driver cancel during create cancels the new Agent before followup', async 
   assert.deepEqual(await prompt, { kind: 'cancelled' });
   assert.deepEqual(calls, [
     'approval:session-1',
-    [{ kind: 'user' }, { keepInbox: true }],
+    [{ kind: 'user' }, { keepInbox: false }],
     'approval:session-1',
   ]);
   assert.equal(disposeCalls, 1);
@@ -603,7 +1009,7 @@ test('driver cancel during resume cancels the resumed Agent before followup', as
   assert.deepEqual(await prompt, { kind: 'cancelled' });
   assert.deepEqual(calls, [
     'approval:session-1',
-    [{ kind: 'user' }, { keepInbox: true }],
+    [{ kind: 'user' }, { keepInbox: false }],
     'approval:session-1',
   ]);
 });
@@ -680,7 +1086,7 @@ test('driver keeps the process alive until a pending followup reaches its config
     import { createAgentDriver } from './lib/agent-driver.js';
     const agent = {
       id: 'session-1',
-      session: { events: [] },
+      session: { header: { cwd: '/work/project' }, events: [] },
       followup() { return new Promise(() => {}); },
       whenIdle: async () => {},
       cancel() {},
@@ -767,4 +1173,32 @@ test('driver disposes an owned handle when its Agent is no longer live', async (
   assert.equal(disposeCalls, 1);
   await driver.dispose();
   assert.equal(disposeCalls, 1);
+});
+
+test('driver preserves a session binding when owned Agent disposal times out', async () => {
+  const agent = fakeAgent('session-1');
+  const bindings = createMemoryBindings({ projectPath: '/work/project' });
+  const handle = {
+    agent,
+    dispose() {
+      return new Promise(() => {});
+    },
+  };
+  const ctx = fakeAgentContext({
+    get: () => agent,
+    create: async () => handle,
+  });
+  const driver = createAgentDriver(ctx, {
+    bindings,
+    config: { cancelTimeoutMs: 10 },
+  });
+
+  await driver.ensureSession('chat-1');
+  await assert.rejects(() => driver.reset('chat-1'), /FEISHU_AGENT_DISPOSE_FAILED/);
+  assert.equal(bindings.get('chat-1').sessionId, 'session-1');
+  await assert.rejects(
+    () => driver.ensureSession('chat-1'),
+    /FEISHU_AGENT_UNAVAILABLE: the bound Agent requires \/new before reuse/,
+  );
+  await driver.dispose();
 });

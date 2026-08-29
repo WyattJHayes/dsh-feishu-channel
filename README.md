@@ -5,6 +5,7 @@
 当前版本支持：
 
 - 绑定项目目录后复用同一个 DSH Agent 会话；桌面端可以看到同一 session。
+- `/new` 会清除当前会话级模型选择；下一次创建 Agent 时使用当前默认模型。
 - 同一 chat 的普通 prompt 按 FIFO 顺序执行，阶段摘要和最终结果回发飞书。
 - `/project`、`/new`、`/status`、`/cancel`、`/approve`、`/deny`、`/help`。
 - 高风险工具调用的一次性审批。审批默认 10 分钟过期，取消、断线或插件停止时按拒绝处理。
@@ -41,7 +42,7 @@ dsh credentials set FEISHU_APP_SECRET <your-app-secret>
 
 群聊回复默认只发给通过白名单的发送者，避免群内其他成员旁观 Agent 输出。确实需要共享群聊结果时，显式设置 `groupOutputMode: group`，并确认群成员都属于可信输出受众。未授权事件不会回发拒绝消息，以避免身份探测和出站队列消耗。
 
-可选配置包括 `stateFile`、`groupOutputMode`、`approvalTimeoutMs`、`progressIntervalMs`、`maxProgressMessages`、`maxPromptLength`、`maxQueuedPrompts`、`maxOutboundQueue`、`maxOutboundTextLength`、`maxOutboundChunks`、`dedupeCapacity`、`dedupeTtlMs`、`agentOperationTimeoutMs`、`whenIdleTimeoutMs` 和 `cancelTimeoutMs`。数值配置有保守上限，`maxQueuedPrompts` 默认是 8，`maxOutboundQueue` 默认是 64，`maxOutboundTextLength` 默认是 12000，`maxOutboundChunks` 默认是 4，`stateFile` 只能落在 `$DSH_HOME/cache` 内。
+可选配置包括 `stateFile`、`groupOutputMode`、`approvalTimeoutMs`、`progressIntervalMs`、`maxProgressMessages`、`progressStatusTtlMs`、`maxProgressSessions`、`maxPromptLength`、`maxQueuedPrompts`、`maxOutboundQueue`、`maxOutboundTextLength`、`maxOutboundChunks`、`dedupeCapacity`、`dedupeTtlMs`、`agentOperationTimeoutMs`、`whenIdleTimeoutMs` 和 `cancelTimeoutMs`。数值配置有保守上限，`maxProgressMessages` 默认是 12，`progressStatusTtlMs` 默认是 900000 毫秒，`maxProgressSessions` 默认是 1024，`maxQueuedPrompts` 默认是 8，`maxOutboundQueue` 默认是 64，`maxOutboundTextLength` 默认是 12000，`maxOutboundChunks` 默认是 4，`stateFile` 只能落在 DSH 主目录的 `cache` 内；未设置 `DSH_HOME` 时沿用 DSH 的默认 `~/.dsh` 主目录。
 
 ## 使用
 

@@ -427,6 +427,55 @@ test('router sends only sanitized bounded error text when a prompt fails', async
   assert.ok(lastText(options).length < 180);
 });
 
+test('router distinguishes a pending Agent result from an empty response', async () => {
+  const options = makeRouterOptions({
+    bindings: createMemoryBindings({ 'chat-1': { projectPath: '/work/project' } }),
+    driver: {
+      enqueuePrompt() {
+        return { position: 1, promise: Promise.resolve({ kind: 'pending' }) };
+      },
+    },
+  });
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({ eventId: 'e-pending', chatId: 'chat-1', openId: 'user-1', chatType: 'p2p', text: 'run' });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(lastText(options), /处理中/);
+  assert.equal(lastText(options).includes('没有返回文本'), false);
+});
+
+test('router logs final result delivery failures separately without exposing result content', async () => {
+  const errors = [];
+  const options = makeRouterOptions({
+    bindings: createMemoryBindings({ 'chat-1': { projectPath: '/work/project' } }),
+    logger: {
+      warn() {},
+      error(message) {
+        errors.push(message);
+      },
+    },
+    sendText: async (_chatId, text) => {
+      if (text === 'final result') {
+        const error = new Error('FEISHU_SEND_FAILED: final result SECRET_VALUE');
+        throw error;
+      }
+    },
+    driver: {
+      enqueuePrompt() {
+        return { position: 1, promise: Promise.resolve({ kind: 'text', text: 'final result' }) };
+      },
+    },
+  });
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({ eventId: 'e-final-send-failed', chatId: 'chat-1', openId: 'user-1', chatType: 'p2p', text: 'run' });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(errors, ['feishu-channel: final result send failed: FEISHU_SEND_FAILED']);
+  assert.equal(errors.join('\n').includes('SECRET_VALUE'), false);
+});
+
 test('router does not expose unstructured Agent error text', async () => {
   const failure = createDeferred();
   const options = makeRouterOptions({

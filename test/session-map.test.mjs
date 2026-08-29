@@ -40,6 +40,25 @@ test('session map clears only the agent session and preserves project binding', 
   await rm(dir, { recursive: true, force: true });
 });
 
+test('session map drops the session-local model when clearing a session', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'feishu-state-'));
+  const file = join(dir, 'state.json');
+  const state = createSessionMap(file, { now: () => '2026-08-28T00:00:00.000Z' });
+  state.bind('oc_1', {
+    projectPath: '/tmp/project',
+    sessionId: 'session-1',
+    model: { provider: 'openrouter', model: 'retired-model' },
+  });
+
+  state.clearSession('oc_1');
+
+  assert.deepEqual(state.get('oc_1'), {
+    projectPath: '/tmp/project',
+    updatedAt: '2026-08-28T00:00:00.000Z',
+  });
+  await rm(dir, { recursive: true, force: true });
+});
+
 test('session map leaves a corrupt primary file untouched and writes recovery state beside it', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'feishu-state-'));
   const file = join(dir, 'state.json');

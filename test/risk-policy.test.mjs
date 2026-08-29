@@ -141,6 +141,37 @@ test('risk policy resolves relative file paths and ignores non-path content', ()
   }).kind, 'allow');
 });
 
+test('risk policy enforces shell workdir and includes only its safe relative path', () => {
+  assert.deepEqual(classifyToolExecution({
+    name: 'bash',
+    arguments: { command: 'pnpm test', workdir: '/work/project/scripts' },
+  }, {
+    projectPath: '/work/project',
+  }), {
+    kind: 'ask',
+    reason: 'RISK_POLICY_SCRIPT_COMMAND',
+    summary: {
+      toolName: 'bash',
+      riskCategory: 'script-command',
+      projectRelativePath: 'scripts',
+    },
+  });
+
+  assert.deepEqual(classifyToolExecution({
+    name: 'bash',
+    arguments: { command: 'pnpm test', workdir: '/outside/project' },
+  }, {
+    projectPath: '/work/project',
+  }), { kind: 'deny', reason: 'RISK_POLICY_WORKDIR_OUTSIDE_PROJECT' });
+
+  assert.deepEqual(classifyToolExecution({
+    name: 'bash',
+    arguments: { command: 'pnpm test', workdir: 'scripts' },
+  }, {
+    projectPath: '/work/project',
+  }), { kind: 'deny', reason: 'RISK_POLICY_WORKDIR_UNKNOWN' });
+});
+
 test('risk policy rejects relative paths in safe git reads', () => {
   assert.equal(classifyToolExecution({
     name: 'bash',
@@ -276,6 +307,21 @@ test('risk policy denies Git metadata writes through an in-project symlink alias
   }, {
     projectPath: project,
   }).kind, 'deny');
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test('risk policy denies Git metadata writes when the project root is Git metadata', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'risk-root-'));
+  const gitRoot = join(root, '.git');
+  await mkdir(join(gitRoot, 'hooks'), { recursive: true });
+
+  assert.deepEqual(classifyToolExecution({
+    name: 'write',
+    arguments: { path: join(gitRoot, 'config') },
+  }, {
+    projectPath: gitRoot,
+  }), { kind: 'deny', reason: 'RISK_POLICY_GIT_METADATA_WRITE' });
 
   await rm(root, { recursive: true, force: true });
 });

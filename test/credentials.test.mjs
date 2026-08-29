@@ -15,6 +15,19 @@ test('config: default credential refs use environment-compatible names', () => {
   assert.equal(config.appSecretRef, 'FEISHU_APP_SECRET');
 });
 
+test('config: gives complete Agent turns a five-minute idle budget by default', () => {
+  const { config } = normalizeConfig();
+
+  assert.equal(config.whenIdleTimeoutMs, 300000);
+});
+
+test('config: bounds progress status retention by default', () => {
+  const { config } = normalizeConfig();
+
+  assert.equal(config.progressStatusTtlMs, 900000);
+  assert.equal(config.maxProgressSessions, 1024);
+});
+
 test('config: rejects credential refs that are not environment-compatible names', () => {
   const result = normalizeConfig({ appIdRef: 'feishu.app_id', appSecretRef: 'FEISHU_APP_SECRET' });
 
@@ -820,6 +833,45 @@ test('plugin: registers session event relay during apply assembly', async () => 
     assert.equal(typeof plugin.handleMessage, 'function');
     assert.equal(registrations.some((entry) => entry.name === 'session/event'), true);
     assert.equal(effects.length, 1);
+    effects.at(-1)?.();
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('plugin: uses the DSH home service when DSH_HOME is not exported', async () => {
+  const previousHome = process.env.DSH_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dsh-feishu-channel-'));
+  const registrations = [];
+  const effects = [];
+  const ctx = {
+    dshHomePath() {
+      return home;
+    },
+    credentials: { resolve: async () => ({ value: '' }) },
+    agents: { get: () => undefined },
+    agentDefaultModel: {
+      currentSelection() {
+        return { provider: 'deepseek', model: 'default-model' };
+      },
+    },
+    on(name, listener) {
+      registrations.push({ name, listener });
+      return () => {};
+    },
+    effect(effect) {
+      effects.push(effect());
+    },
+    logger: { warn() {}, info() {} },
+  };
+
+  delete process.env.DSH_HOME;
+  try {
+    apply(ctx);
+
+    assert.equal(registrations.some((entry) => entry.name === 'session/event'), true);
     effects.at(-1)?.();
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME;

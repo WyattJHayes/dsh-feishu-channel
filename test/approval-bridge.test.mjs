@@ -305,6 +305,30 @@ test('approval bridge sanitizes summary fields before sending', async () => {
   assert.equal(await decision, 'unavailable');
 });
 
+test('approval bridge includes a bounded action label without raw command details', async () => {
+  const requests = [];
+  const bridge = createApprovalBridge({
+    timeoutMs: 1000,
+    tokenFactory: () => 'ap-action',
+    sendApproval: async (_chatId, message) => requests.push(message),
+  });
+  bridge.remember({ agent: { id: 'session-1' }, callId: 'call-1' }, {
+    toolName: 'bash',
+    riskCategory: 'git-publish',
+    projectRelativePath: '.',
+  });
+  const decision = bridge.createListener(() => 'chat-1')({
+    agent: { id: 'session-1' },
+    callId: 'call-1',
+  }, async () => 'next');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(requests[0], /动作: 推送 Git 更改/);
+  assert.equal(requests[0].includes('git push'), false);
+  await bridge.answer('chat-1', 'ap-action', 'unavailable');
+  assert.equal(await decision, 'unavailable');
+});
+
 test('approval bridge fails closed on send failure, timeout, cancellation, and close', async () => {
   const failedBridge = createApprovalBridge({
     timeoutMs: 1000,
