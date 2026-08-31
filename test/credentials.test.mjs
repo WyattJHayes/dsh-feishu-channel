@@ -1085,6 +1085,66 @@ test('plugin: reports WS readiness only after a successful handshake callback', 
   }
 });
 
+test('plugin: reports a bounded startup failure when WS start rejects', async () => {
+  const previousHome = process.env.DSH_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dsh-feishu-channel-'));
+  const effects = [];
+  const logs = [];
+  const originalStart = WSClient.prototype.start;
+  const originalClose = WSClient.prototype.close;
+  let closed = false;
+
+  WSClient.prototype.start = async function start() {
+    throw new Error('FEISHU_WS_START_FAILED: secret transport details');
+  };
+  WSClient.prototype.close = function close() {
+    closed = true;
+  };
+
+  const ctx = {
+    credentials: {
+      resolve(ref) {
+        return Promise.resolve({ value: ref === 'FEISHU_APP_ID' ? 'app-id' : 'app-secret' });
+      },
+    },
+    agents: { get: () => undefined },
+    agentDefaultModel: {
+      currentSelection() {
+        return { provider: 'deepseek', model: 'default-model' };
+      },
+    },
+    on() {
+      return () => {};
+    },
+    effect(effect) {
+      effects.push(effect());
+    },
+    logger: {
+      warn(message) { logs.push(`warn:${message}`); },
+      info(message) { logs.push(`info:${message}`); },
+    },
+  };
+
+  process.env.DSH_HOME = home;
+  try {
+    apply(ctx);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(logs.some((message) => message.includes('long connection established')), false);
+    assert.equal(logs.some((message) => message.includes('startup failed: FEISHU_WS_START_FAILED')), true);
+    assert.equal(logs.some((message) => message.includes('secret transport details')), false);
+
+    effects.at(-1)?.();
+    assert.equal(closed, true);
+  } finally {
+    WSClient.prototype.start = originalStart;
+    WSClient.prototype.close = originalClose;
+    if (previousHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('plugin: restores the session-to-chat index during startup', () => {
   const indexed = createIndexedBindings({
     entries() {
