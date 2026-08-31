@@ -939,9 +939,13 @@ test('plugin: uses the DSH home service when DSH_HOME is not exported', async ()
 
 test('plugin: registers bridge cleanup when DSH_HOME is unavailable', async () => {
   const previousHome = process.env.DSH_HOME;
+  const home = await mkdtemp(join(tmpdir(), 'dsh-feishu-channel-'));
   delete process.env.DSH_HOME;
   const effects = [];
   const ctx = {
+    dshHomePath() {
+      return home;
+    },
     credentials: { resolve: async () => ({ value: '' }) },
     effect(effect) {
       effects.push(effect());
@@ -958,6 +962,7 @@ test('plugin: registers bridge cleanup when DSH_HOME is unavailable', async () =
   } finally {
     if (previousHome === undefined) delete process.env.DSH_HOME;
     else process.env.DSH_HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
   }
 });
 
