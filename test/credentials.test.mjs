@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WSClient } from '@larksuiteoapi/node-sdk';
 import { normalizeConfig } from '../lib/config.js';
-import { apply, createIndexedBindings, resolveStatePath } from '../lib/index.js';
+import { apply, createIndexedBindings, extractText, resolveStatePath } from '../lib/index.js';
 
 test('config: default credential refs use environment-compatible names', () => {
   const { config } = normalizeConfig();
@@ -85,6 +85,27 @@ test('plugin: reads the top-level event id emitted by the Lark dispatcher', asyn
 
   assert.equal(extractEventId({ event_id: 'event-top-level' }), 'event-top-level');
   assert.equal(extractEventId({ header: { event_id: 'event-legacy' } }), 'event-legacy');
+});
+
+test('plugin: rejects non-string encoded message content before JSON coercion', () => {
+  let coerced = false;
+  const content = {
+    toString() {
+      coerced = true;
+      return JSON.stringify({ text: 'safe' });
+    },
+  };
+
+  assert.equal(extractText(content, { maxContentLength: 100 }), '');
+  assert.equal(coerced, false);
+  assert.equal(extractText(JSON.stringify({ text: 'safe' }), { maxContentLength: 5 }), '');
+});
+
+test('plugin: rejects decoded message text before trim and command routing', () => {
+  assert.equal(
+    extractText(JSON.stringify({ text: '123456' }), { maxTextLength: 3 }),
+    '',
+  );
 });
 
 test('agent: maps the selected default model to creation options', async () => {
@@ -326,6 +347,42 @@ test('agent: keeps a visible truncation marker for a very small output limit', a
     extractAssistantText({ content: [{ type: 'text', text: '123' }] }, 1),
     '…',
   );
+});
+
+test('agent: stops reading assistant blocks after the output limit is reached', async () => {
+  const { extractAssistantText } = await import('../lib/index.js');
+  let laterBlockReads = 0;
+  const message = {
+    content: [
+      { type: 'text', text: '1234567890' },
+      {
+        type: 'text',
+        get text() {
+          laterBlockReads += 1;
+          return 'later block';
+        },
+      },
+    ],
+  };
+
+  assert.equal(extractAssistantText(message, 9), '1\n[输出已截断]');
+  assert.equal(laterBlockReads, 0);
+});
+
+test('agent: extracts a turn without allocating a suffix or reversed event copy', async () => {
+  const { getAgentTurnResult } = await import('../lib/index.js');
+  class NonCopyingEvents extends Array {
+    filter() {
+      throw new Error('event suffix copy is not allowed');
+    }
+  }
+  const events = new NonCopyingEvents(
+    { seq: 0, type: 'turn/start', data: { turn: 1 } },
+    { seq: 1, type: 'assistant/message', data: { turn: 1, message: { content: [{ type: 'text', text: 'done' }] } } },
+    { seq: 2, type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } },
+  );
+
+  assert.deepEqual(getAgentTurnResult(events, 0, 1), { kind: 'text', text: 'done' });
 });
 
 test('agent: does not select an unrelated latest turn without a claimed turn', async () => {

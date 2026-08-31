@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { createDedupe } from '../lib/dedupe.js';
 import { createMessageRouter } from '../lib/message-router.js';
 
 function createMemoryBindings(initial = {}) {
@@ -155,6 +156,51 @@ test('router ignores duplicated event ids', async () => {
   await router.handleMessage(event);
 
   assert.equal(options.sendCalls, 1);
+});
+
+test('router does not let unauthorized events evict an authorized event id', async () => {
+  const options = makeRouterOptions();
+  const router = createMessageRouter({
+    ...options,
+    dedupe: createDedupe({ capacity: 2, ttlMs: 60_000, now: () => 0 }),
+  });
+  const authorized = {
+    eventId: 'authorized-event',
+    chatId: 'chat-1',
+    openId: 'user-1',
+    chatType: 'p2p',
+    text: '/status',
+  };
+
+  await router.handleMessage(authorized);
+  await router.handleMessage({ ...authorized, eventId: 'unauthorized-1', openId: 'user-x' });
+  await router.handleMessage({ ...authorized, eventId: 'unauthorized-2', openId: 'user-x' });
+  await router.handleMessage(authorized);
+
+  assert.equal(options.sendCalls, 1);
+});
+
+test('router rejects non-string message text before coercion or command parsing', async () => {
+  let coerced = false;
+  const options = makeRouterOptions();
+  const router = createMessageRouter(options);
+
+  await router.handleMessage({
+    eventId: 'non-string-text',
+    chatId: 'chat-1',
+    openId: 'user-1',
+    chatType: 'p2p',
+    text: {
+      toString() {
+        coerced = true;
+        return 'run';
+      },
+    },
+  });
+
+  assert.equal(coerced, false);
+  assert.equal(options.driver.promptCalls, 0);
+  assert.equal(options.sendCalls, 0);
 });
 
 test('router drops messages without event ids or with unknown chat types', async () => {

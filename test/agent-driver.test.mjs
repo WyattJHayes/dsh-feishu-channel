@@ -1014,6 +1014,117 @@ test('driver cancel during resume cancels the resumed Agent before followup', as
   ]);
 });
 
+test('driver disposes a resumed handle that arrives after reset cancellation timed out', async () => {
+  let releaseResume;
+  let liveAgent;
+  let disposeCalls = 0;
+  const agent = fakeAgent('session-1', {
+    session: {
+      id: 'session-1',
+      header: { cwd: '/work/project' },
+      events: [{ type: 'approval/policy', data: { policy: 'ask' } }],
+      append(type, data) {
+        this.events.push({ type, data });
+      },
+    },
+  });
+  const handle = {
+    agent,
+    dispose() {
+      disposeCalls += 1;
+      liveAgent = undefined;
+    },
+  };
+  const driver = createAgentDriver({
+    agents: {
+      get: () => liveAgent,
+      resume: async () => {
+        await new Promise((resolve) => {
+          releaseResume = resolve;
+        });
+        liveAgent = agent;
+        return handle;
+      },
+    },
+    agentDefaultModel: {
+      currentSelection() {
+        return { provider: 'deepseek', model: 'default-model' };
+      },
+    },
+    permissionPresets: remotePermissionPresets(),
+  }, {
+    bindings: createMemoryBindings({
+      projectPath: '/work/project',
+      sessionId: 'session-1',
+      model: { provider: 'deepseek', model: 'model-1' },
+    }),
+    config: { cancelTimeoutMs: 20, agentOperationTimeoutMs: 1000 },
+  });
+
+  const prompt = driver.enqueuePrompt('chat-1', 'run');
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(() => driver.reset('chat-1'), /FEISHU_CANCEL_TIMEOUT/);
+
+  releaseResume();
+  assert.deepEqual(await prompt, { kind: 'cancelled' });
+  assert.equal(disposeCalls, 1);
+  await assert.rejects(
+    () => driver.ensureSession('chat-1'),
+    /FEISHU_AGENT_UNAVAILABLE: the bound Agent requires \/new before reuse/,
+  );
+  await driver.dispose();
+});
+
+test('driver allows retry when a cancelled resume fails without leaving a live session', async () => {
+  let releaseFirstResume;
+  let rejectFirstResume;
+  let liveAgent;
+  let resumeCalls = 0;
+  const agent = fakeAgent('session-1');
+  const handle = { agent, dispose() {} };
+  const driver = createAgentDriver({
+    agents: {
+      get: () => liveAgent,
+      resume: async () => {
+        resumeCalls += 1;
+        if (resumeCalls === 1) {
+          await new Promise((resolve, reject) => {
+            releaseFirstResume = resolve;
+            rejectFirstResume = reject;
+          });
+        }
+        liveAgent = agent;
+        return handle;
+      },
+    },
+    agentDefaultModel: {
+      currentSelection() {
+        return { provider: 'deepseek', model: 'default-model' };
+      },
+    },
+    permissionPresets: remotePermissionPresets(),
+  }, {
+    bindings: createMemoryBindings({
+      projectPath: '/work/project',
+      sessionId: 'session-1',
+      model: { provider: 'deepseek', model: 'model-1' },
+    }),
+    config: { cancelTimeoutMs: 1000, agentOperationTimeoutMs: 1000 },
+  });
+
+  const prompt = driver.enqueuePrompt('chat-1', 'run');
+  await new Promise((resolve) => setImmediate(resolve));
+  const cancellation = driver.cancel('chat-1');
+  rejectFirstResume(new Error('resume unavailable'));
+
+  assert.deepEqual(await cancellation, { cancelled: true });
+  assert.deepEqual(await prompt, { kind: 'cancelled' });
+  assert.equal(await driver.ensureSession('chat-1'), 'session-1');
+  assert.equal(resumeCalls, 2);
+  releaseFirstResume();
+  await driver.dispose();
+});
+
 test('driver reset cancels the current Agent and preserves project binding', async () => {
   const bindings = createMemoryBindings({
     projectPath: '/work/project',
