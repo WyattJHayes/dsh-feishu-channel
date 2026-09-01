@@ -338,9 +338,9 @@ test('driver setup mounts the Agent preset before registering scoped listeners',
         },
       },
     },
-    on(name, listener) {
+    on(name, listener, options) {
       setupCalls.push(`on:${name}`);
-      registrations.push({ name, listener });
+      registrations.push({ name, listener, options });
       return () => {};
     },
   };
@@ -374,6 +374,7 @@ test('driver setup mounts the Agent preset before registering scoped listeners',
     'tools/pre-execute',
     'approval/request',
   ]);
+  assert.deepEqual(registrations.at(-1).options, { prepend: true });
 });
 
 test('agent setup rejects approval requests from an inactive Feishu run', async () => {
