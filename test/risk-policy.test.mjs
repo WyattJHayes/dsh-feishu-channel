@@ -14,7 +14,17 @@ test('risk policy allows safe project reads but asks before running project scri
   }).kind, 'ask');
 });
 
-test('risk policy allows only scoped str_replace_editor operations', () => {
+test('risk policy allows scoped editor reads and asks before editor writes', () => {
+  assert.deepEqual(classifyToolExecution({
+    name: 'str_replace_editor',
+    arguments: {
+      command: 'view',
+      path: '/work/src/app.js',
+    },
+  }, {
+    projectPath: '/work',
+  }), { kind: 'allow' });
+
   assert.deepEqual(classifyToolExecution({
     name: 'str_replace_editor',
     arguments: {
@@ -25,7 +35,15 @@ test('risk policy allows only scoped str_replace_editor operations', () => {
     },
   }, {
     projectPath: '/work',
-  }), { kind: 'allow' });
+  }), {
+    kind: 'ask',
+    reason: 'RISK_POLICY_FILE_WRITE',
+    summary: {
+      toolName: 'str_replace_editor',
+      riskCategory: 'file-write',
+      projectRelativePath: 'src/app.js',
+    },
+  });
 
   assert.equal(classifyToolExecution({
     name: 'str_replace_editor',
@@ -138,7 +156,43 @@ test('risk policy resolves relative file paths and ignores non-path content', ()
     arguments: { path: '/work/project/inside.txt', content: '/outside/decoy' },
   }, {
     projectPath: '/work/project',
-  }).kind, 'allow');
+  }).kind, 'ask');
+});
+
+test('risk policy requires approval for project file writes', () => {
+  for (const toolName of ['edit', 'write', 'fs_write', 'fs_edit']) {
+    assert.deepEqual(classifyToolExecution({
+      name: toolName,
+      arguments: { path: '/work/project/src/approval-smoke.txt' },
+    }, {
+      projectPath: '/work/project',
+    }), {
+      kind: 'ask',
+      reason: 'RISK_POLICY_FILE_WRITE',
+      summary: {
+        toolName,
+        riskCategory: 'file-write',
+        projectRelativePath: 'src/approval-smoke.txt',
+      },
+    });
+  }
+
+  for (const command of ['create', 'str_replace', 'insert', 'undo_edit']) {
+    assert.deepEqual(classifyToolExecution({
+      name: 'str_replace_editor',
+      arguments: { command, path: '/work/project/src/approval-smoke.txt' },
+    }, {
+      projectPath: '/work/project',
+    }), {
+      kind: 'ask',
+      reason: 'RISK_POLICY_FILE_WRITE',
+      summary: {
+        toolName: 'str_replace_editor',
+        riskCategory: 'file-write',
+        projectRelativePath: 'src/approval-smoke.txt',
+      },
+    });
+  }
 });
 
 test('risk policy enforces shell workdir and includes only its safe relative path', () => {
@@ -198,7 +252,7 @@ test('risk policy denies compound commands instead of prefix allowing them', () 
   }
 });
 
-test('risk policy uses canonical paths to reject symlink escapes and allow safe new files', async () => {
+test('risk policy uses canonical paths to reject symlink escapes and ask for safe new files', async () => {
   const root = await mkdtemp(join(tmpdir(), 'risk-root-'));
   const project = join(root, 'project');
   const outside = await mkdtemp(join(tmpdir(), 'risk-outside-'));
@@ -217,7 +271,7 @@ test('risk policy uses canonical paths to reject symlink escapes and allow safe 
     arguments: { path: join(project, 'new-file.txt') },
   }, {
     projectPath: project,
-  }).kind, 'allow');
+  }).kind, 'ask');
 
   await rm(root, { recursive: true, force: true });
   await rm(outside, { recursive: true, force: true });
