@@ -128,6 +128,7 @@ test('progress relay stops sending after maxMessages but keeps status current', 
 test('progress relay catches async send failures and continues handling later events', async () => {
   let currentTime = 0;
   const sent = [];
+  const warnings = [];
   const relay = createProgressRelay({
     getChatId: () => 'chat-1',
     sendText: async (_chatId, text) => {
@@ -137,6 +138,11 @@ test('progress relay catches async send failures and continues handling later ev
     minIntervalMs: 0,
     maxMessages: 3,
     now: () => currentTime,
+    logger: {
+      warn(message) {
+        warnings.push(message);
+      },
+    },
   });
   const session = { id: 'session-1' };
 
@@ -146,6 +152,7 @@ test('progress relay catches async send failures and continues handling later ev
   await flushAsyncSends();
 
   assert.deepEqual(sent, ['Calling tool: bash.']);
+  assert.deepEqual(warnings, ['feishu-channel: progress send failed']);
   assert.equal(relay.getStatus('session-1').messageCount, 2);
 });
 

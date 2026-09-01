@@ -15,10 +15,21 @@ test('config: default credential refs use environment-compatible names', () => {
   assert.equal(config.appSecretRef, 'FEISHU_APP_SECRET');
 });
 
-test('config: gives complete Agent turns a five-minute idle budget by default', () => {
+test('config: gives complete Agent turns the approval budget by default', () => {
   const { config } = normalizeConfig();
 
-  assert.equal(config.whenIdleTimeoutMs, 300000);
+  assert.equal(config.approvalTimeoutMs, 600000);
+  assert.equal(config.whenIdleTimeoutMs, 600000);
+});
+
+test('config: extends the Agent idle budget to cover a longer approval budget', () => {
+  const { config, errors } = normalizeConfig({
+    approvalTimeoutMs: 900000,
+    whenIdleTimeoutMs: 300000,
+  });
+
+  assert.deepEqual(errors, []);
+  assert.equal(config.whenIdleTimeoutMs, 900000);
 });
 
 test('config: bounds progress status retention by default', () => {
@@ -642,6 +653,41 @@ test('sender bounds final output length and expanded chunk count before queueing
   const text = requests.map((request) => JSON.parse(request.data.content).text).join('');
   assert.equal(Array.from(text).length, 7600);
   assert.match(text, /输出已截断/);
+});
+
+test('sender redacts credential values and common secret formats before sending', async () => {
+  const { createFeishuSender } = await import('../lib/index.js');
+  const requests = [];
+  const sender = createFeishuSender({
+    resolveCredential: async (ref) => ref === 'FEISHU_APP_ID' ? 'app-id-value' : 'app-secret-value',
+    clientFactory: () => ({
+      im: {
+        message: {
+          create: async (request) => {
+            requests.push(request);
+            return { code: 0 };
+          },
+        },
+      },
+    }),
+    timeoutMs: 100,
+  });
+
+  await sender('chat-1', [
+    'app id app-id-value',
+    'app_secret=app-secret-value',
+    'Authorization: Bearer bearer-token-value-123456',
+    'export API_TOKEN=environment-token-value',
+    'ordinary token wording remains visible',
+  ].join('\n'));
+
+  const text = requests.map((request) => JSON.parse(request.data.content).text).join('');
+  assert.equal(text.includes('app-id-value'), false);
+  assert.equal(text.includes('app-secret-value'), false);
+  assert.equal(text.includes('bearer-token-value-123456'), false);
+  assert.equal(text.includes('environment-token-value'), false);
+  assert.match(text, /\[REDACTED\]/);
+  assert.match(text, /ordinary token wording remains visible/);
 });
 
 test('sender can target an authorized group sender instead of the shared chat', async () => {

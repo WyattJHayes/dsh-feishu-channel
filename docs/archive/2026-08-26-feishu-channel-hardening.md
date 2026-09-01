@@ -6,11 +6,13 @@
 >
 > 完成验证日期：2026-09-01
 >
-> 当前验证基线：`d56b13f2e`（`codex/feishu-channel` 的当前提交）
+> 当前验证基线：`57c987b30`（当前 HEAD；工作树含本轮未提交收尾变更）
+>
+> 目标分支：`codex/feishu-channel`（当前为 `d56b13f2e`，尚未合并本轮收尾变更）
 >
 > 当前收尾分支：`codex/feishu-channel-closeout`
 
-本记录归档原 Feishu channel 加固计划。技术实现、本地自动验证和真实飞书人工冒烟已经完成，其中已覆盖私聊访问控制、项目绑定、普通任务 FIFO、审批、取消与重置、重启恢复；群聊访问控制按本轮范围不执行，出站失败仍未执行，因此本记录不宣称所有真实环境端到端路径均已覆盖。当前分支以既有加固提交 `d56b13f2e` 为基线，只包含本轮验证补强，不重写既有加固提交，也不包含凭据、消息正文、工具参数或环境变量。
+本记录归档原 Feishu channel 加固计划。技术实现、本地自动验证和真实飞书人工冒烟已经完成，其中已覆盖私聊访问控制、项目绑定、普通任务 FIFO、审批、取消与重置、重启恢复；群聊访问控制按本轮范围不执行，出站失败仍未执行，因此本记录不宣称所有真实环境端到端路径均已覆盖。收尾分支当前尚未合并到目标分支，记录不包含凭据、消息正文、工具参数或环境变量。
 
 ## 目标与范围
 
@@ -35,6 +37,7 @@
 | Git 元数据、输出边界、群聊发送者隔离 | `025bd2611` | `lib/index.js`、`lib/message-router.js`、`lib/risk-policy.js` 及边界测试 |
 | Agent 生命周期、权限作用域、项目路径、进度状态、最终结果发送 | `2fe8ec190` | 相关 `lib/` 模块和 `test/` 回归套件 |
 | 剩余竞态、输入边界、CI 和仓库级安全文档 | `d56b13f2e` | 当前分支基线，包含 `.github/workflows/ci.yml`、`SECURITY.md`、`CONTRIBUTING.md` 及额外回归测试 |
+| 收尾验证、归档和当前工作树补强 | `9a0d61204`、`16e7c0636`、`9dbfc7514`、`57c987b30` 及未提交工作树 | `docs/archive/2026-08-26-feishu-channel-hardening.md`、验证脚本、出站策略、Agent 超时和进度告警 |
 
 ## 证据状态
 
@@ -45,6 +48,8 @@
 - [x] FIFO、取消、reset barrier、generation、dedupe TTL、出站串行发送、重试、队列上限和输出截断具备回归测试。
 - [x] WebSocket readiness 只在 handshake 回调后记录；`WSClient.start()` rejection 只记录有界且脱敏的启动失败，并在 cleanup 时关闭客户端。
 - [x] npm 包使用 allowlist，测试文件和 `docs/` 不进入发布包。
+- [x] 出站消息统一经过凭据和常见 Secret 格式脱敏；进度回传失败保留固定告警，不暴露正文。
+- [x] Agent idle 预算不短于审批预算；取消未完成的 idle 等待时会清理驱动自身的超时计时器。
 - [x] 本轮新增测试覆盖 `WSClient.start()` rejection，且不依赖真实网络、不写入 trace 或秘密。
 
 ### 无法从仓库证明的过程
@@ -66,18 +71,17 @@
 
 ## 自动验证记录
 
-验证工作树以 `d56b13f2e` 为基线，包含本轮验证改动。命令和结果如下：
+验证工作树以 `57c987b30` 为 HEAD 基线，包含当前未提交收尾改动。命令和结果如下：
 
 | 检查 | 结果 |
 | --- | --- |
 | `npm ci` | 通过；安装锁定依赖，发现 0 个漏洞 |
-| `npm test` | 通过，215/215 |
-| `node --test test/credentials.test.mjs` | 通过，56/56 |
-| `npm run test:coverage` | 通过，215/215；行 95.48%，分支 87.45%，函数 86.71% |
+| `npm test` | 通过，219/219 |
+| `npm run test:coverage` | 通过，219/219；行 95.50%，分支 87.35%，函数 86.84% |
 | 覆盖率门槛 | 通过；行 90%，分支 80%，函数 85% |
 | `for file in lib/*.js; do node --check "$file"; done` | 通过 |
-| `npm audit --omit=dev --audit-level=low` | 通过；0 个漏洞 |
-| `npm pack --dry-run --json` | 通过；17 个 allowlist 文件，包含 `LICENSE`、`README.md`、`package.json`、`cordis.patch.yml` |
+| `npm audit --omit=dev --audit-level=high` | 通过；0 个漏洞 |
+| `npm pack --dry-run --json` | 通过；18 个 allowlist 文件，包含 `LICENSE`、`README.md`、`package.json`、`cordis.patch.yml` 和 `lib/outbound-policy.js` |
 | `git diff --check` | 通过 |
 
 覆盖率脚本固定为：
@@ -109,7 +113,7 @@ CI 使用 `npm run test:coverage`，并同时执行语法检查、生产依赖�
 
 ## 已知限制
 
-- 当前收尾分支为 `codex/feishu-channel-closeout`，目标基线为 `codex/feishu-channel`；本分支已包含 `d56b13f2e`，不会覆盖目标分支已有提交。
+- 当前收尾分支为 `codex/feishu-channel-closeout`，目标基线为 `codex/feishu-channel`；本分支已包含 `d56b13f2e`，当前工作树仍有未提交变更，尚未合并或推送，不会覆盖目标分支已有提交。
 - 自动测试使用 SDK 和 Agent 的替身，不能代替真实飞书长连接、权限配置、网络重试和真实 DSH 运行时验证。
-- 人工审批需要在 Agent idle 上限内完成；当前默认 `whenIdleTimeoutMs` 为 5 分钟，而审批 token 默认有效期为 10 分钟。快速审批已通过，较慢审批可能先收到 `FEISHU_AGENT_IDLE_TIMEOUT`。
+- Agent idle 等待预算会被提升到不短于审批 token 预算；默认两者均为 10 分钟。仍需避免超过配置预算的长时间 Agent 操作。
 - 覆盖率门槛用于阻止回退，不代表所有安全路径均已覆盖，也不作为安全质量本身的替代品。
