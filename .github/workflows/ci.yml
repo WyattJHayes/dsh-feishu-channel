@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches:
+      - codex/feishu-channel
       - main
       - master
   pull_request:

@@ -538,6 +538,25 @@ test('driver runs prompts FIFO and returns the result for each turn', async () =
   assert.deepEqual(order, ['start:first', 'end:first', 'start:second', 'end:second']);
 });
 
+test('driver waits through the approval budget before reporting an idle timeout', async () => {
+  const agent = fakeAgent('session-1', {
+    async followup() {
+      this.session.events.push({ seq: 0, type: 'turn/start', data: { turn: 1 } });
+    },
+    whenIdle: () => new Promise((resolve) => setTimeout(resolve, 1500)),
+  });
+  const ctx = fakeAgentContext();
+  ctx.agents.create = async () => ({ agent });
+  ctx.agents.get = () => agent;
+  const driver = createAgentDriver(ctx, {
+    bindings: createMemoryBindings({ projectPath: '/work/project' }),
+    config: { approvalTimeoutMs: 2000, whenIdleTimeoutMs: 1000 },
+  });
+
+  assert.deepEqual(await driver.enqueuePrompt('chat-1', 'run'), { kind: 'pending' });
+  await driver.dispose();
+});
+
 test('driver rejects a live session without the latest ask approval policy', async () => {
   const agent = fakeAgent('session-1');
   const ctx = fakeAgentContext({
@@ -705,6 +724,58 @@ test('driver cancel completes when Agent idle never settles', async () => {
   assert.deepEqual(await cancel, { cancelled: true });
   assert.deepEqual(await prompt, { kind: 'cancelled' });
   await driver.dispose();
+});
+
+test('driver cancellation does not retain the idle timeout after an unresolved idle wait', async () => {
+  const program = `
+    import { createAgentDriver } from './lib/agent-driver.js';
+    let followupStarted;
+    const followupStartedPromise = new Promise((resolve) => {
+      followupStarted = resolve;
+    });
+    const agent = {
+      id: 'session-1',
+      session: { header: { cwd: '/work/project' }, events: [] },
+      async followup() {
+        followupStarted();
+      },
+      whenIdle() { return new Promise(() => {}); },
+      cancel() {},
+      ctx: { on() { return () => {}; } },
+    };
+    let binding = { projectPath: '/work/project' };
+    const driver = createAgentDriver({
+      agents: {
+        get(id) { return id === 'session-1' ? agent : undefined; },
+        async create() { return { agent }; },
+      },
+      agentDefaultModel: {
+        currentSelection() { return { provider: 'deepseek', model: 'default-model' }; },
+      },
+      permissionPresets: {
+        apply() {},
+        current() { return 'workspace-write'; },
+      },
+    }, {
+      bindings: {
+        get() { return binding; },
+        bind(_chatId, next) { binding = next; },
+        clearSession() {},
+      },
+      config: { cancelTimeoutMs: 15, whenIdleTimeoutMs: 600000 },
+    });
+    const prompt = driver.enqueuePrompt('chat-1', 'run');
+    await followupStartedPromise;
+    await driver.cancel('chat-1');
+    await prompt;
+    console.log('cancelled');
+  `;
+  const result = await execFile(process.execPath, ['--input-type=module', '--eval', program], {
+    cwd: process.cwd(),
+    timeout: 500,
+  });
+
+  assert.equal(result.stdout.trim(), 'cancelled');
 });
 
 test('driver does not report cancellation until the active followup settles', async () => {
